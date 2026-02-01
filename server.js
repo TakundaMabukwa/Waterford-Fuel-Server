@@ -21,7 +21,7 @@ app.use('/api/energy-rite/activity-reports', require('./routes/energy-rite-activ
 app.use('/api/energy-rite/activity-excel-reports', require('./routes/energy-rite-activity-excel-reports'));
 app.use('/api/energy-rite/monitoring', require('./routes/energy-rite-monitoring'));
 app.use('/api/energy-rite/executive-dashboard', require('./routes/energy-rite-executive-dashboard'));
-app.use('/api/energy-rite/enhanced-executive-dashboard', require('./routes/enhanced-executive-dashboard'));
+app.use('/api/energy-rite/enhanced-executive-dashboard', require('./routes/enhanced-executive-dashboard')); // File excluded from git
 app.use('/api/energy-rite/report-distribution', require('./routes/energy-rite-report-distribution'));
 app.use('/api/energy-rite/fuel-fills', require('./routes/energy-rite-fuel-fills'));
 app.use('/api/energy-rite/cumulative-snapshots', require('./routes/energy-rite-cumulative-snapshots'));
