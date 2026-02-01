@@ -61,6 +61,10 @@ async function initDatabase() {
         highest_fuel REAL,
         highest_percentage REAL,
         highest_loc_time TEXT,
+        lowest_fuel REAL,
+        lowest_percentage REAL,
+        lowest_loc_time TEXT,
+        watcher_type TEXT DEFAULT 'FILL',
         timeout_at INTEGER,
         last_increased_at INTEGER
       )
@@ -213,19 +217,25 @@ function setFuelFillWatcher(plate, data) {
   db.run(`
     INSERT OR REPLACE INTO fuel_fill_watchers 
     (plate, start_time, start_loc_time, opening_fuel, opening_percentage, 
-     highest_fuel, highest_percentage, highest_loc_time, timeout_at, last_increased_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     highest_fuel, highest_percentage, highest_loc_time,
+     lowest_fuel, lowest_percentage, lowest_loc_time,
+     watcher_type, timeout_at, last_increased_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `, [
     plate,
     data.startTime,
     data.startLocTime,
     data.openingFuel,
     data.openingPercentage,
-    data.highestFuel,
-    data.highestPercentage,
-    data.highestLocTime,
+    data.highestFuel || null,
+    data.highestPercentage || null,
+    data.highestLocTime || null,
+    data.lowestFuel || null,
+    data.lowestPercentage || null,
+    data.lowestLocTime || null,
+    data.watcherType || 'FILL',
     now + (10 * 60 * 1000), // Max 10 minutes timeout
-    now // Last increased at creation time
+    now // Last changed at creation time
   ]);
   saveDatabase();
 }
@@ -237,6 +247,16 @@ function updateFuelFillWatcherHighest(plate, highestFuel, highestPercentage, hig
     SET highest_fuel = ?, highest_percentage = ?, highest_loc_time = ?, last_increased_at = ?
     WHERE plate = ?
   `, [highestFuel, highestPercentage, highestLocTime, Date.now(), plate]);
+  saveDatabase();
+}
+
+function updateFuelFillWatcherLowest(plate, lowestFuel, lowestPercentage, lowestLocTime) {
+  if (!db) return;
+  db.run(`
+    UPDATE fuel_fill_watchers 
+    SET lowest_fuel = ?, lowest_percentage = ?, lowest_loc_time = ?, last_increased_at = ?
+    WHERE plate = ?
+  `, [lowestFuel, lowestPercentage, lowestLocTime, Date.now(), plate]);
   saveDatabase();
 }
 
@@ -466,6 +486,7 @@ module.exports = {
   getFuelFillWatcher,
   setFuelFillWatcher,
   updateFuelFillWatcherHighest,
+  updateFuelFillWatcherLowest,
   deleteFuelFillWatcher,
   getAllFuelFillWatchers,
   getExpiredFuelFillWatchers,

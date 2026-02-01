@@ -31,14 +31,14 @@ function addReportHeader(worksheet, activityData, costCode, siteId) {
   // Try to add logo image
   const fs = require('fs');
   const path = require('path');
-  const logoPath = path.join(__dirname, '../../assets/logo.png');
+  const logoPath = path.join(__dirname, '../../waterford.jpeg');
   
   try {
     if (fs.existsSync(logoPath)) {
       const logoBuffer = fs.readFileSync(logoPath);
       const imageId = workbook.addImage({
         buffer: logoBuffer,
-        extension: 'png'
+        extension: 'jpeg'
       });
       worksheet.addImage(imageId, {
         tl: { col: 0.1, row: 0.1 },
@@ -323,7 +323,7 @@ class EnergyRiteActivityExcelReportController {
       // Generate filename
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
       const costCodeSuffix = cost_code ? `_${cost_code}` : (site_id ? `_${site_id}` : '_ALL');
-      const fileName = `Activity_Report${costCodeSuffix}_${activityData.date}_${timestamp}.xlsx`;
+      const fileName = `Waterford_Activity_Report${costCodeSuffix}_${activityData.date}_${timestamp}.xlsx`;
       
       // Save to buffer
       const buffer = await workbook.xlsx.writeBuffer();

@@ -35,7 +35,7 @@ class EnergyRiteExcelReportGenerator {
       
       // Generate unique filename with timestamp to avoid conflicts
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
-      const fileName = `Energy_Rite_${reportType}_Report_${periodName.replace(/\s+/g, '_')}_${timestamp}.xlsx`;
+      const fileName = `Waterford_${reportType}_Report_${periodName.replace(/\s+/g, '_')}_${timestamp}.xlsx`;
       const filePath = path.join(__dirname, '../../temp', fileName);
       
       // Ensure temp directory exists
@@ -437,14 +437,14 @@ class EnergyRiteExcelReportGenerator {
     // Try to add logo image
     const fs = require('fs');
     const path = require('path');
-    const logoPath = path.join(__dirname, '../../assets/logo.png');
+    const logoPath = path.join(__dirname, '../../waterford.jpeg');
     
     try {
       if (fs.existsSync(logoPath)) {
         const logoBuffer = fs.readFileSync(logoPath);
         const imageId = workbook.addImage({
           buffer: logoBuffer,
-          extension: 'png'
+          extension: 'jpeg'
         });
         worksheet.addImage(imageId, {
           tl: { col: 0.1, row: 0.1 },
