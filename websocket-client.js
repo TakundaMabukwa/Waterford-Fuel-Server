@@ -2,7 +2,6 @@ const WebSocket = require('ws');
 const { supabase } = require('./supabase-client');
 const { detectFuelTheft } = require('./helpers/fuel-theft-detector');
 const { detectFuelFill } = require('./helpers/fuel-fill-detector');
-const ImprovedOnOffDetection = require('./fix-onoff-detection');
 const pendingFuelDb = require('./pending-fuel-db');
 
 class EnergyRiteWebSocketClient {
@@ -11,7 +10,6 @@ class EnergyRiteWebSocketClient {
     this.ws = null;
     this.reconnectAttempts = 0;
     this.maxReconnectAttempts = 10;
-    this.onOffDetector = new ImprovedOnOffDetection();
     this.testMode = wsUrl === 'dummy';
     this.pendingFuelUpdates = new Map();
     this.pendingClosures = new Map();
