@@ -167,11 +167,13 @@ class EnergyRiteWebSocketClient {
         DriverName: vehicleData.DriverName,
         fuel_probe_1_level: vehicleData.fuel_probe_1_level,
         fuel_probe_1_volume_in_tank: vehicleData.fuel_probe_1_volume_in_tank,
+        Speed: vehicleData.Speed,
         Temperature: vehicleData.Temperature
       });
       
       // Parse fuel data from Temperature field if present
       const fuelData = this.parseFuelData(vehicleData);
+      const speed = parseFloat(vehicleData.Speed) || 0;
       
       // Store fuel data if available
       if (fuelData.hasFuelData) {
@@ -187,13 +189,16 @@ class EnergyRiteWebSocketClient {
         fuelHistory.push({
           locTime: vehicleData.LocTime,
           timestamp: fuelTimestamp,
+          speed: speed,
           ...fuelData
         });
-        // Keep only last 20 entries in memory
-        if (fuelHistory.length > 20) fuelHistory.shift();
+        // Keep last 30 minutes in memory (for fuel theft detection)
+        const thirtyMinutesAgo = fuelTimestamp - (30 * 60 * 1000);
+        while (fuelHistory.length > 0 && fuelHistory[0].timestamp < thirtyMinutesAgo) {
+          fuelHistory.shift();
+        }
         
         // Also store in SQLite for persistence across restarts
-        // Store all fuel values including 0 (empty tank)
         if (fuelData.fuel_probe_1_volume_in_tank >= 0) {
           pendingFuelDb.storeFuelHistory(
             actualBranch,
@@ -209,66 +214,24 @@ class EnergyRiteWebSocketClient {
         
         // Update any pending closures waiting for closing fuel data
         await this.updatePendingClosure(actualBranch, vehicleData);
-        
-        // ❌ DISABLED: Passive fill detection - only use status-based detection
-        // await this.detectPassiveFill(actualBranch, fuelData, vehicleData.LocTime);
       }
       
-      // Handle engine status FIRST (before fuel fill processing)
+      // Handle engine/ignition status FIRST
       const engineStatus = this.parseEngineStatus(vehicleData.DriverName);
       if (engineStatus) {
         console.log(`🔧 Processing engine ${engineStatus} for ${actualBranch}`);
         await this.handleSessionChange(actualBranch, engineStatus, vehicleData);
       }
       
-      // Then handle fuel fill status
-      const hasFuelFillStatus = this.parseFuelFillStatus(vehicleData.DriverName);
-      
-      // ALWAYS track lowest fuel level (even during fill status)
-      if (fuelData.hasFuelData) {
-        this.trackPreFillLowest(actualBranch, fuelData, vehicleData.LocTime);
+      // Handle fuel theft status (like fuel fill, but reversed)
+      const fuelTheftStatus = this.parseFuelTheftStatus(vehicleData.DriverName);
+      if (fuelTheftStatus) {
+        await this.handleFuelTheftStart(actualBranch, vehicleData);
       }
       
-      if (hasFuelFillStatus) {
-        await this.handleFuelFillStart(actualBranch, vehicleData);
-      } else {
-        // Status disappeared - start watcher if we have pending fill (using SQLite)
-        const pending = pendingFuelDb.getPendingFuelFill(actualBranch);
-        if (pending && fuelData.hasFuelData) {
-          if (pending.opening_fuel) {
-            // Start watcher to track highest fuel until it stabilizes
-            pendingFuelDb.setFuelFillWatcher(actualBranch, {
-              startTime: pending.start_time,
-              startLocTime: pending.start_loc_time,
-              openingFuel: pending.opening_fuel,
-              openingPercentage: pending.opening_percentage,
-              highestFuel: fuelData.fuel_probe_1_volume_in_tank,
-              highestPercentage: fuelData.fuel_probe_1_level_percentage,
-              highestLocTime: vehicleData.LocTime
-            });
-            pendingFuelDb.deletePendingFuelFill(actualBranch);
-            console.log(`🔍 Status ended for ${actualBranch} - Watching for highest fuel (until stabilizes)`);
-            // Note: Completion happens when fuel stabilizes (2 min no increase) or max 10 min timeout
-          } else if (pending.waitingForOpeningFuel) {
-            // Got opening fuel when status disappeared, start watcher immediately
-            pendingFuelDb.setFuelFillWatcher(actualBranch, {
-              startTime: pending.start_time,
-              startLocTime: pending.start_loc_time,
-              openingFuel: fuelData.fuel_probe_1_volume_in_tank,
-              openingPercentage: fuelData.fuel_probe_1_level_percentage,
-              highestFuel: fuelData.fuel_probe_1_volume_in_tank,
-              highestPercentage: fuelData.fuel_probe_1_level_percentage,
-              highestLocTime: vehicleData.LocTime
-            });
-            pendingFuelDb.deletePendingFuelFill(actualBranch);
-            console.log(`🔍 Status ended for ${actualBranch} - Got opening fuel, watching for highest (until stabilizes)`);
-            // Note: Completion happens when fuel stabilizes (2 min no increase) or max 10 min timeout
-          }
-        }
-        
-        if (fuelData.hasFuelData) {
-          await this.checkPendingFuelFill(actualBranch, fuelData, vehicleData.LocTime);
-        }
+      // Waterford fuel fill detection using watcher: +15L in 2 min when engine OFF
+      if (fuelData.hasFuelData) {
+        await this.detectWaterfordFuelFill(actualBranch, fuelData, vehicleData.LocTime, speed);
       }
 
     } catch (error) {
@@ -342,6 +305,97 @@ class EnergyRiteWebSocketClient {
       console.error(`❌ Error tracking pre-fill lowest for ${plate}:`, error.message);
     }
   }
+
+  /**
+   * Waterford fuel fill detection using watcher:
+   * - Detects +15L increase within 2 minutes when engine/ignition OFF
+   * - Ignores if speed >= 10 km/h (vehicle moving)
+   * - Uses watcher to track lowest and highest fuel levels
+   */
+  async detectWaterfordFuelFill(plate, fuelData, locTime, speed) {
+    try {
+      const currentFuel = fuelData.fuel_probe_1_volume_in_tank;
+      const currentTime = new Date(this.convertLocTime(locTime)).getTime();
+      
+      // Ignore if vehicle is moving (speed >= 10 km/h)
+      if (speed >= 10) {
+        return;
+      }
+      
+      // Check if engine/ignition is OFF
+      const { data: sessions } = await supabase
+        .from('energy_rite_operating_sessions')
+        .select('session_status')
+        .eq('branch', plate)
+        .eq('session_status', 'ONGOING')
+        .limit(1);
+      
+      const engineIsOff = !sessions || sessions.length === 0;
+      if (!engineIsOff) {
+        return; // Only detect fills when engine/ignition is OFF
+      }
+      
+      // Check if we have an active watcher
+      const watcher = pendingFuelDb.getFuelFillWatcher(plate);
+      if (watcher) {
+        // Update highest fuel if current is higher
+        if (currentFuel > watcher.highest_fuel) {
+          pendingFuelDb.updateFuelFillWatcherHighest(plate, currentFuel, fuelData.fuel_probe_1_level_percentage, locTime);
+          console.log(`📈 Fill watcher update: ${plate} highest fuel now ${currentFuel}L`);
+        }
+        return;
+      }
+      
+      // Find lowest fuel in last 2 minutes
+      const twoMinutesAgo = currentTime - (2 * 60 * 1000);
+      let lowestFuel = null;
+      let lowestTime = null;
+      let lowestLocTime = null;
+      let lowestPercentage = null;
+      
+      const fuelHistory = this.recentFuelData.get(plate);
+      if (fuelHistory && fuelHistory.length > 0) {
+        for (const entry of fuelHistory) {
+          if (entry.timestamp >= twoMinutesAgo && entry.timestamp < currentTime) {
+            if (lowestFuel === null || entry.fuel_probe_1_volume_in_tank < lowestFuel) {
+              lowestFuel = entry.fuel_probe_1_volume_in_tank;
+              lowestTime = entry.timestamp;
+              lowestLocTime = entry.locTime;
+              lowestPercentage = entry.fuel_probe_1_level_percentage;
+            }
+          }
+        }
+      }
+      
+      if (lowestFuel === null) return;
+      
+      const fuelIncrease = currentFuel - lowestFuel;
+      
+      // Start watcher if fuel increased by 15L+
+      if (fuelIncrease >= 15) {
+        console.log(`⛽ WATERFORD FILL DETECTED: ${plate} - +${fuelIncrease.toFixed(1)}L, starting watcher (engine OFF, speed: ${speed}km/h)`);
+        
+        const startTime = this.convertLocTime(lowestLocTime);
+        pendingFuelDb.setFuelFillWatcher(plate, {
+          startTime: startTime,
+          startLocTime: lowestLocTime,
+          openingFuel: lowestFuel,
+          openingPercentage: lowestPercentage,
+          highestFuel: currentFuel,
+          highestPercentage: fuelData.fuel_probe_1_level_percentage,
+          highestLocTime: locTime
+        });
+      }
+    } catch (error) {
+      console.error(`❌ Error detecting Waterford fuel fill for ${plate}:`, error.message);
+    }
+  }
+
+  /**
+   * Waterford fuel theft detection:
+   * - 200L tank drops by 50L+ when engine/ignition OFF
+   * - Triggered by "POSSIBLE FUEL THEFT" status or automatic detection
+   */
 
   /**
    * Passive fill detection - detects fills without "FUEL FILL" status message
@@ -744,17 +798,21 @@ class EnergyRiteWebSocketClient {
     const normalized = driverName.replace(/\s+/g, ' ').trim().toUpperCase();
     console.log(`🔍 Checking engine status: "${driverName}" -> "${normalized}"`);
     
-    // Check for ENGINE and PTO status
-    if (normalized.includes('ENGINE ON') || normalized.includes('PTO ON')) {
-      console.log(`🟢 ENGINE ON DETECTED: ${driverName}`);
+    // Priority detection: ENGINE, IGNITION, and PTO status
+    if (normalized.includes('ENGINE ON') || 
+        normalized.includes('IGNITION ON') || 
+        normalized.includes('PTO ON')) {
+      console.log(`🟢 ENGINE/IGNITION ON DETECTED: ${driverName}`);
       return 'ON';
     }
-    if (normalized.includes('ENGINE OFF') || normalized.includes('PTO OFF')) {
-      console.log(`🔴 ENGINE OFF DETECTED: ${driverName}`);
+    if (normalized.includes('ENGINE OFF') || 
+        normalized.includes('IGNITION OFF') || 
+        normalized.includes('PTO OFF')) {
+      console.log(`🔴 ENGINE/IGNITION OFF DETECTED: ${driverName}`);
       return 'OFF';
     }
     
-    console.log(`ℹ️ No engine status detected in: "${driverName}"`);
+    console.log(`ℹ️ No engine/ignition status detected in: "${driverName}"`);
     return null;
   }
 
@@ -777,6 +835,99 @@ class EnergyRiteWebSocketClient {
     
     console.log(`ℹ️ No fuel fill status detected in: "${driverName}"`);
     return null;
+  }
+
+  parseFuelTheftStatus(driverName) {
+    if (!driverName || driverName.trim() === '') {
+      return null;
+    }
+    
+    const normalized = driverName.replace(/\s+/g, ' ').trim().toUpperCase();
+    
+    if (normalized.includes('POSSIBLE FUEL THEFT') ||
+        normalized.includes('FUEL THEFT')) {
+      console.log(`🚨 FUEL THEFT STATUS DETECTED: ${driverName}`);
+      return 'START';
+    }
+    
+    return null;
+  }
+
+  async handleFuelTheftStart(plate, vehicleData) {
+    try {
+      const currentTime = this.convertLocTime(vehicleData.LocTime);
+      const currentFuel = parseFloat(vehicleData.fuel_probe_1_volume_in_tank) || 0;
+      const currentPercentage = parseFloat(vehicleData.fuel_probe_1_level_percentage) || 0;
+      
+      // Find highest fuel before theft (last 30 minutes) - like finding lowest for fills
+      const currentTimestamp = new Date(currentTime).getTime();
+      const thirtyMinutesAgo = currentTimestamp - (30 * 60 * 1000);
+      
+      let highestFuel = currentFuel;
+      let highestPercentage = currentPercentage;
+      let highestLocTime = vehicleData.LocTime;
+      
+      const fuelHistory = this.recentFuelData.get(plate);
+      if (fuelHistory && fuelHistory.length > 0) {
+        for (const entry of fuelHistory) {
+          if (entry.timestamp >= thirtyMinutesAgo && entry.timestamp < currentTimestamp) {
+            if (entry.fuel_probe_1_volume_in_tank > highestFuel) {
+              highestFuel = entry.fuel_probe_1_volume_in_tank;
+              highestPercentage = entry.fuel_probe_1_level_percentage;
+              highestLocTime = entry.locTime;
+            }
+          }
+        }
+      }
+      
+      const theftAmount = Math.max(0, highestFuel - currentFuel);
+      const startTime = this.convertLocTime(highestLocTime);
+      const endTime = currentTime;
+      const startTimeMs = new Date(startTime).getTime();
+      const endTimeMs = new Date(endTime).getTime();
+      const duration = (endTimeMs - startTimeMs) / 1000;
+      
+      console.log(`🚨 FUEL THEFT: ${plate} - ${highestFuel}L → ${currentFuel}L = -${theftAmount.toFixed(1)}L`);
+      
+      // Record as session (exactly like fuel fill but measuring loss)
+      await supabase.from('energy_rite_operating_sessions').insert({
+        branch: plate,
+        company: 'WATERFORD',
+        session_date: startTime.split('T')[0],
+        session_start_time: startTime,
+        session_end_time: endTime,
+        operating_hours: duration / 3600,
+        opening_fuel: highestFuel,
+        opening_percentage: highestPercentage,
+        closing_fuel: currentFuel,
+        closing_percentage: currentPercentage,
+        total_fill: -theftAmount, // Negative for theft (like fills but negative)
+        session_status: 'FUEL_THEFT_COMPLETED',
+        notes: `Fuel theft completed. Duration: ${duration.toFixed(1)}s, Opening: ${highestFuel}L, Closing: ${currentFuel}L, Lost: ${theftAmount.toFixed(1)}L`
+      });
+      
+      console.log(`🚨 FUEL THEFT COMPLETE: ${plate} - ${highestFuel}L → ${currentFuel}L = -${theftAmount.toFixed(1)}L`);
+      
+      // Also record in anomalies table for alerts
+      await supabase.from('energy_rite_fuel_anomalies').insert({
+        plate: plate,
+        anomaly_type: 'FUEL_THEFT',
+        anomaly_date: currentTime,
+        fuel_before: highestFuel,
+        fuel_after: currentFuel,
+        difference: -theftAmount,
+        severity: theftAmount >= 100 ? 'CRITICAL' : theftAmount >= 50 ? 'HIGH' : 'MEDIUM',
+        status: 'confirmed',
+        anomaly_data: {
+          detection_method: 'STATUS_MESSAGE',
+          status_message: vehicleData.DriverName,
+          duration_seconds: duration
+        }
+      });
+      
+    } catch (error) {
+      console.error(`❌ Error handling fuel theft for ${plate}:`, error.message);
+    }
   }
 
   async handleFuelFill(plate, fillResult) {

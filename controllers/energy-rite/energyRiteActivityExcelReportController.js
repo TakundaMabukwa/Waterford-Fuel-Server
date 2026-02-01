@@ -197,6 +197,102 @@ function addActivityData(worksheet, activityData) {
   });
 }
 
+async function addFuelTheftData(worksheet, date, costCode, siteId) {
+  // Query fuel theft anomalies for the date
+  let query = supabase
+    .from('energy_rite_fuel_anomalies')
+    .select('*')
+    .eq('anomaly_type', 'FUEL_THEFT')
+    .gte('anomaly_date', `${date}T00:00:00`)
+    .lte('anomaly_date', `${date}T23:59:59`)
+    .order('anomaly_date', { ascending: true });
+  
+  // Apply filters
+  if (siteId) {
+    query = query.eq('plate', siteId);
+  }
+  
+  const { data: thefts, error } = await query;
+  
+  if (error || !thefts || thefts.length === 0) {
+    return; // No theft data to display
+  }
+  
+  // Add spacing
+  worksheet.addRow([]);
+  worksheet.addRow([]);
+  
+  // Fuel Theft Section Header
+  worksheet.mergeCells(`A${worksheet.lastRow.number + 1}:K${worksheet.lastRow.number + 1}`);
+  const theftHeaderCell = worksheet.getCell(`A${worksheet.lastRow.number}`);
+  theftHeaderCell.value = '🚨 FUEL THEFT ALERTS';
+  theftHeaderCell.font = { size: 14, bold: true, color: { argb: 'FFFFFFFF' } };
+  theftHeaderCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFF9800' } };
+  theftHeaderCell.alignment = { horizontal: 'center', vertical: 'middle' };
+  
+  // Theft data header
+  const theftDataHeader = worksheet.addRow([
+    'Site',
+    'Time',
+    'Fuel Before',
+    'Fuel After',
+    'Amount Lost',
+    'Severity',
+    'Status',
+    '', '', '', ''
+  ]);
+  
+  theftDataHeader.eachCell((cell, colNumber) => {
+    if (colNumber <= 7) {
+      cell.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFB74D' } };
+      cell.alignment = { horizontal: 'center', vertical: 'middle' };
+      cell.border = {
+        top: { style: 'thin' }, left: { style: 'thin' },
+        bottom: { style: 'thin' }, right: { style: 'thin' }
+      };
+    }
+  });
+  
+  // Add theft records
+  thefts.forEach(theft => {
+    const time = new Date(theft.anomaly_date).toLocaleTimeString('en-ZA', { hour: '2-digit', minute: '2-digit' });
+    const row = worksheet.addRow([
+      theft.plate,
+      time,
+      `${theft.fuel_before.toFixed(1)}L`,
+      `${theft.fuel_after.toFixed(1)}L`,
+      `${Math.abs(theft.difference).toFixed(1)}L`,
+      theft.severity,
+      theft.status.toUpperCase(),
+      '', '', '', ''
+    ]);
+    
+    // Style theft rows with yellow background
+    row.eachCell((cell, colNumber) => {
+      if (colNumber <= 7) {
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF9C4' } };
+        cell.border = {
+          top: { style: 'thin' }, left: { style: 'thin' },
+          bottom: { style: 'thin' }, right: { style: 'thin' }
+        };
+        cell.alignment = { horizontal: 'center', vertical: 'middle' };
+        
+        // Highlight severity
+        if (colNumber === 6) {
+          if (theft.severity === 'CRITICAL') {
+            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFF5252' } };
+            cell.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+          } else if (theft.severity === 'HIGH') {
+            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFAB40' } };
+            cell.font = { bold: true };
+          }
+        }
+      }
+    });
+  });
+}
+
 class EnergyRiteActivityExcelReportController {
   
 
@@ -222,6 +318,7 @@ class EnergyRiteActivityExcelReportController {
       setupWorksheetLayout(worksheet);
       addReportHeader(worksheet, activityData, cost_code, site_id);
       addActivityData(worksheet, activityData);
+      await addFuelTheftData(worksheet, date || new Date().toISOString().split('T')[0], cost_code, site_id);
       
       // Generate filename
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
