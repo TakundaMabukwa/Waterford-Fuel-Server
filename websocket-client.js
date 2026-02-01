@@ -1179,6 +1179,7 @@ class EnergyRiteWebSocketClient {
         }
       } else if (engineStatus === 'OFF') {
         // ALWAYS wait for NEXT fuel data (C# controller behavior)
+        // PLUS wait for fuel to stabilize (vehicle stops moving)
         const { data: sessions } = await supabase
           .from('energy_rite_operating_sessions')
           .select('*')
@@ -1189,14 +1190,14 @@ class EnergyRiteWebSocketClient {
           
         if (sessions && Array.isArray(sessions) && sessions.length > 0) {
           const session = sessions[0];
-          // Mark session for closure, wait for NEXT fuel data after OFF status
+          // Mark session for closure, wait for fuel data 30s after OFF (in LocTime)
           this.pendingClosures.set(plate, { 
             sessionId: session.id, 
             endTime: currentTime,
             statusLocTime: wsMessage.LocTime,
-            timestamp: Date.now() 
+            timestamp: Date.now()
           });
-          console.log(`⏳ Engine OFF for ${plate} - Waiting for NEXT fuel data to complete session`);
+          console.log(`⏳ Engine OFF for ${plate} - Waiting 30s (LocTime) for fuel to stabilize`);
         }
       }
       
@@ -1364,7 +1365,17 @@ class EnergyRiteWebSocketClient {
       
       const pending = this.pendingClosures.get(plate);
       
-      // Find closest fuel data to ENGINE OFF LocTime
+      // Check if 30 seconds have passed based on LocTime (not system time)
+      const currentLocTime = new Date(this.convertLocTime(vehicleData.LocTime)).getTime();
+      const offLocTime = new Date(this.convertLocTime(pending.statusLocTime)).getTime();
+      const timeSinceOff = currentLocTime - offLocTime;
+      
+      if (timeSinceOff < 30000) { // 30 seconds in LocTime
+        console.log(`⏳ ${plate} - Waiting for fuel stabilization (${Math.round((30000 - timeSinceOff) / 1000)}s remaining in LocTime)`);
+        return; // Wait for fuel to stabilize
+      }
+      
+      // Find closest fuel data to ENGINE OFF LocTime (after 30s stabilization)
       const closestFuel = this.findClosestFuelData(plate, pending.statusLocTime);
       if (!closestFuel) {
         console.log(`⏳ Waiting for fuel data closer to ENGINE OFF time for ${plate}`);
