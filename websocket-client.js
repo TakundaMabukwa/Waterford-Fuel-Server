@@ -613,7 +613,7 @@ class EnergyRiteWebSocketClient {
       
       await supabase.from('energy_rite_operating_sessions').insert({
         branch: plate,
-        company: 'KFC',
+        company: 'WATERFORD',
         session_date: watcher.start_time.split('T')[0],
         session_start_time: watcher.start_time,
         session_end_time: endTime,
@@ -985,7 +985,7 @@ class EnergyRiteWebSocketClient {
           
           await supabase.from('energy_rite_operating_sessions').insert({
             branch: plate,
-            company: 'KFC',
+            company: 'WATERFORD',
             session_date: currentTime.split('T')[0],
             session_start_time: currentTime,
             opening_fuel: openingFuel,
@@ -1121,7 +1121,7 @@ class EnergyRiteWebSocketClient {
               console.log(`⚠️ ENGINE ON: ${plate} - Incomplete fuel data (${openingFuel}L but 0%), waiting for complete data`);
               const { data: newSession } = await supabase.from('energy_rite_operating_sessions').insert({
                 branch: plate,
-                company: 'KFC',
+                company: 'WATERFORD',
                 session_date: currentTime.split('T')[0],
                 session_start_time: currentTime,
                 opening_fuel: 0,
@@ -1142,7 +1142,7 @@ class EnergyRiteWebSocketClient {
             
             await supabase.from('energy_rite_operating_sessions').insert({
               branch: plate,
-              company: 'KFC',
+              company: 'WATERFORD',
               session_date: currentTime.split('T')[0],
               session_start_time: currentTime,
               opening_fuel: openingFuel,
@@ -1156,7 +1156,7 @@ class EnergyRiteWebSocketClient {
             // Wait for NEXT fuel data (like ENGINE OFF)
             const { data: newSession } = await supabase.from('energy_rite_operating_sessions').insert({
               branch: plate,
-              company: 'KFC',
+              company: 'WATERFORD',
               session_date: currentTime.split('T')[0],
               session_start_time: currentTime,
               opening_fuel: 0,
