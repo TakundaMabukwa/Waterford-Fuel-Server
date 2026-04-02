@@ -384,7 +384,11 @@ class EnergyRiteWebSocketClient {
       const fuelHistory = this.recentFuelData.get(plate);
       if (!fuelHistory || fuelHistory.length === 0) return;
       
-      const previousMessage = fuelHistory[fuelHistory.length - 1];
+      // The current reading is appended before detection runs, so we need the
+      // reading before the latest entry for a true message-to-message diff.
+      const previousMessage = fuelHistory.length >= 2
+        ? fuelHistory[fuelHistory.length - 2]
+        : null;
       if (!previousMessage) return;
       
       const previousFuel = previousMessage.fuel_probe_1_volume_in_tank;
@@ -689,7 +693,7 @@ class EnergyRiteWebSocketClient {
         const endTimeMs = new Date(endTime).getTime();
         const duration = (endTimeMs - startTime) / 1000;
         
-        await supabase.from('energy_rite_operating_sessions').insert({
+        const { error: fillInsertError } = await supabase.from('energy_rite_operating_sessions').insert({
           branch: plate,
           company: 'WATERFORD',
           session_date: watcher.start_time.split('T')[0],
@@ -704,6 +708,10 @@ class EnergyRiteWebSocketClient {
           session_status: 'FUEL_FILL_COMPLETED',
           notes: `Fuel fill completed. Duration: ${duration.toFixed(1)}s, Opening: ${watcher.opening_fuel}L, Stable closing: ${closingFuel}L, Peak seen: ${watcher.highest_fuel}L, Filled: ${fillAmount.toFixed(1)}L`
         });
+
+        if (fillInsertError) {
+          throw new Error(`Failed to insert completed fill session: ${fillInsertError.message}`);
+        }
         
         console.log(`⛽ FILL COMPLETE: ${plate} - ${watcher.opening_fuel}L → ${watcher.highest_fuel}L = +${fillAmount.toFixed(1)}L`);
         
@@ -753,7 +761,7 @@ class EnergyRiteWebSocketClient {
         const endTimeMs = new Date(endTime).getTime();
         const duration = (endTimeMs - startTime) / 1000;
         
-        await supabase.from('energy_rite_operating_sessions').insert({
+        const { error: theftInsertError } = await supabase.from('energy_rite_operating_sessions').insert({
           branch: plate,
           company: 'WATERFORD',
           session_date: watcher.start_time.split('T')[0],
@@ -768,6 +776,10 @@ class EnergyRiteWebSocketClient {
           session_status: 'FUEL_THEFT_COMPLETED',
           notes: `Fuel theft completed. Duration: ${duration.toFixed(1)}s, Opening: ${watcher.opening_fuel}L, Stable closing: ${closingFuel}L, Lowest seen: ${watcher.lowest_fuel}L, Lost: ${theftAmount.toFixed(1)}L`
         });
+
+        if (theftInsertError) {
+          throw new Error(`Failed to insert completed theft session: ${theftInsertError.message}`);
+        }
         
         console.log(`🚨 THEFT COMPLETE: ${plate} - ${watcher.opening_fuel}L → ${watcher.lowest_fuel}L = -${theftAmount.toFixed(1)}L`);
         

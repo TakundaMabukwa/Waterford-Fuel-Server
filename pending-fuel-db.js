@@ -13,6 +13,29 @@ const DB_PATH = path.join(__dirname, 'pending-fuel-states.db');
 let db = null;
 let SQL = null;
 
+function getTableColumns(tableName) {
+  if (!db) return new Set();
+
+  const columns = new Set();
+  const stmt = db.prepare(`PRAGMA table_info(${tableName})`);
+  while (stmt.step()) {
+    const row = stmt.getAsObject();
+    columns.add(row.name);
+  }
+  stmt.free();
+  return columns;
+}
+
+function ensureTableColumns(tableName, columnDefinitions) {
+  if (!db) return;
+
+  const existingColumns = getTableColumns(tableName);
+  for (const [columnName, definition] of Object.entries(columnDefinitions)) {
+    if (existingColumns.has(columnName)) continue;
+    db.run(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition}`);
+  }
+}
+
 async function initDatabase() {
   if (db) return db;
   
@@ -86,6 +109,47 @@ async function initDatabase() {
     
     // Create index for faster lookups
     db.run(`CREATE INDEX IF NOT EXISTS idx_fuel_history_plate_time ON fuel_history(plate, timestamp)`);
+
+    // Migrate older local DB files in place. Existing SQLite tables are not
+    // changed by CREATE TABLE IF NOT EXISTS, so we add any missing columns.
+    ensureTableColumns('pre_fill_watchers', {
+      lowest_fuel: 'REAL',
+      lowest_percentage: 'REAL',
+      lowest_loc_time: 'TEXT',
+      last_update: 'INTEGER'
+    });
+
+    ensureTableColumns('pending_fuel_fills', {
+      start_time: 'TEXT',
+      start_loc_time: 'TEXT',
+      opening_fuel: 'REAL',
+      opening_percentage: 'REAL',
+      waiting_for_opening_fuel: 'INTEGER DEFAULT 0'
+    });
+
+    ensureTableColumns('fuel_fill_watchers', {
+      start_time: 'TEXT',
+      start_loc_time: 'TEXT',
+      opening_fuel: 'REAL',
+      opening_percentage: 'REAL',
+      highest_fuel: 'REAL',
+      highest_percentage: 'REAL',
+      highest_loc_time: 'TEXT',
+      lowest_fuel: 'REAL',
+      lowest_percentage: 'REAL',
+      lowest_loc_time: 'TEXT',
+      watcher_type: "TEXT DEFAULT 'FILL'",
+      timeout_at: 'INTEGER',
+      last_increased_at: 'INTEGER'
+    });
+
+    ensureTableColumns('fuel_history', {
+      fuel_volume: 'REAL',
+      fuel_percentage: 'REAL',
+      fuel_diff: 'REAL DEFAULT 0',
+      loc_time: 'TEXT',
+      timestamp: 'INTEGER'
+    });
     
     saveDatabase();
     console.log('✅ Pending fuel states database initialized');
