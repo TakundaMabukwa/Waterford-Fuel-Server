@@ -630,81 +630,70 @@ class EnergyRiteExcelReportGenerator {
         }
       }
       
-      // Add individual fuel fill rows, grouped in 2-hour windows
+      // Add combined fuel fill rows, grouped in rolling 2-hour windows
       if (site.fills.length > 0) {
-        // Sort fills by start time (earliest first)
         const sortedFills = [...site.fills].sort((a, b) => 
           new Date(a.session_start_time) - new Date(b.session_start_time)
         );
         const twoHoursMs = 2 * 60 * 60 * 1000;
         let previousFillStartMs = null;
-        let fillIndexInWindow = 0;
-        let fillWindowIndex = 0;
+        const groupedFillWindows = [];
+        let currentWindow = [];
 
         for (const fill of sortedFills) {
           const fillStartMs = new Date(fill.session_start_time).getTime();
 
           if (previousFillStartMs === null || fillStartMs - previousFillStartMs > twoHoursMs) {
-            fillWindowIndex += 1;
-            fillIndexInWindow = 0;
-
-            if (previousFillStartMs !== null) {
-              const spacerRow = worksheet.addRow(new Array(18).fill(''));
-              spacerRow.height = 10;
-              spacerRow.eachCell((cell) => {
-                cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFFFFF' } };
-                cell.border = {};
-              });
+            if (currentWindow.length > 0) {
+              groupedFillWindows.push(currentWindow);
             }
-
-            const windowLabel = `Fill Window ${fillWindowIndex}`;
-            const windowStart = new Date(fill.session_start_time).toLocaleTimeString('en-GB', { hour12: false });
-            const windowRow = worksheet.addRow([
-              '',
-              windowLabel,
-              new Date(fill.session_start_time).toLocaleDateString(),
-              `Grouped fills within 2 hours starting ${windowStart}`,
-              '', '', '', '', '', '', '', '', '', '', '', '', '', ''
-            ]);
-            windowRow.height = 20;
-            windowRow.eachCell((cell, colNumber) => {
-              cell.font = { bold: true, size: 9, color: { argb: 'FF355E3B' } };
-              cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEAF6EC' } };
-              cell.alignment = { horizontal: colNumber === 2 || colNumber === 4 ? 'left' : 'center', vertical: 'middle' };
-              cell.border = {
-                left: { style: 'thin', color: { argb: 'FFD7E9DA' } },
-                right: { style: 'thin', color: { argb: 'FFD7E9DA' } },
-                top: { style: 'thin', color: { argb: 'FFD7E9DA' } },
-                bottom: { style: 'thin', color: { argb: 'FFD7E9DA' } }
-              };
-            });
+            currentWindow = [];
           }
 
-          fillIndexInWindow += 1;
+          currentWindow.push(fill);
           previousFillStartMs = fillStartMs;
-          const startTime = new Date(fill.session_start_time).toLocaleTimeString('en-GB', { hour12: false });
-          const endTime = fill.session_end_time ? new Date(fill.session_end_time).toLocaleTimeString('en-GB', { hour12: false }) : 'Ongoing';
+        }
+
+        if (currentWindow.length > 0) {
+          groupedFillWindows.push(currentWindow);
+        }
+
+        groupedFillWindows.forEach((fillWindow, index) => {
+          const firstFill = fillWindow[0];
+          const lastFill = fillWindow[fillWindow.length - 1];
+          const startTime = new Date(firstFill.session_start_time).toLocaleTimeString('en-GB', { hour12: false });
+          const endTime = lastFill.session_end_time ? new Date(lastFill.session_end_time).toLocaleTimeString('en-GB', { hour12: false }) : 'Ongoing';
           const timeRange = `From: ${startTime}    To: ${endTime}`;
-          const fillDurationWithTime = `${fill.duration_formatted || this.formatDuration(fill.operating_hours || 0)}\n${timeRange}`;
-          const fillLabel = `  + Fill ${fillIndexInWindow}`;
-          
+          const startMs = new Date(firstFill.session_start_time).getTime();
+          const endMs = lastFill.session_end_time ? new Date(lastFill.session_end_time).getTime() : startMs;
+          const operatingHours = endMs > startMs ? (endMs - startMs) / (1000 * 60 * 60) : 0;
+          const fillDurationWithTime = `${this.formatDuration(operatingHours)}\n${timeRange}`;
+          const openingFuel = parseFloat(firstFill.opening_fuel || 0);
+          const closingFuel = parseFloat(lastFill.closing_fuel || 0);
+          const openingFuelProbe1 = parseFloat(firstFill.opening_fuel_probe_1 || 0);
+          const openingFuelProbe2 = parseFloat(firstFill.opening_fuel_probe_2 || 0);
+          const closingFuelProbe1 = parseFloat(lastFill.closing_fuel_probe_1 || 0);
+          const closingFuelProbe2 = parseFloat(lastFill.closing_fuel_probe_2 || 0);
+          const totalFill = Math.max(0, closingFuel - openingFuel);
+          const fillLabel = `  + Fill ${index + 1}`;
+
           const fillRow = worksheet.addRow([
             '',
             fillLabel,
-            new Date(fill.session_start_time).toLocaleDateString(),
+            new Date(firstFill.session_start_time).toLocaleDateString(),
             fillDurationWithTime,
-            `${(fill.opening_percentage || 0).toFixed(0)}%`,
-            `${(fill.opening_fuel || 0).toFixed(1)}L`,
-            `${(fill.opening_fuel_probe_1 || 0).toFixed(1)}L`,
-            `${(fill.opening_fuel_probe_2 || 0).toFixed(1)}L`,
-            `${(fill.closing_percentage || 0).toFixed(0)}%`,
-            `${(fill.closing_fuel || 0).toFixed(1)}L`,
-            `${(fill.closing_fuel_probe_1 || 0).toFixed(1)}L`,
-            `${(fill.closing_fuel_probe_2 || 0).toFixed(1)}L`,
+            `${(parseFloat(firstFill.opening_percentage || 0)).toFixed(0)}%`,
+            `${openingFuel.toFixed(1)}L`,
+            `${openingFuelProbe1.toFixed(1)}L`,
+            `${openingFuelProbe2.toFixed(1)}L`,
+            `${(parseFloat(lastFill.closing_percentage || 0)).toFixed(0)}%`,
+            `${closingFuel.toFixed(1)}L`,
+            `${closingFuelProbe1.toFixed(1)}L`,
+            `${closingFuelProbe2.toFixed(1)}L`,
             '0.00L',
-            `${(fill.total_fill || 0).toFixed(2)}L`,
-            `${(Math.max(0, (fill.closing_fuel_probe_1 || 0) - (fill.opening_fuel_probe_1 || 0))).toFixed(2)}L`,
-            `${(Math.max(0, (fill.closing_fuel_probe_2 || 0) - (fill.opening_fuel_probe_2 || 0))).toFixed(2)}L`,
+            `${totalFill.toFixed(2)}L`,
+            `${(Math.max(0, closingFuelProbe1 - openingFuelProbe1)).toFixed(2)}L`,
+            `${(Math.max(0, closingFuelProbe2 - openingFuelProbe2)).toFixed(2)}L`,
             'N/A',
             'R0.00'
           ]);
@@ -729,7 +718,7 @@ class EnergyRiteExcelReportGenerator {
             };
           });
           fillRow.height = 24;
-        }
+        });
       }
     }
     
