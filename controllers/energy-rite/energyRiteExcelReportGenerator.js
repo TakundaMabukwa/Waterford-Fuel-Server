@@ -409,13 +409,19 @@ class EnergyRiteExcelReportGenerator {
       { width: 14 },  // C: Date  
       { width: 28 },  // D: Operating Hours (increased from 16)
       { width: 16 },  // E: Opening Percentage
-      { width: 14 },  // F: Opening Fuel
-      { width: 16 },  // G: Closing Percentage
-      { width: 14 },  // H: Closing Fuel
-      { width: 12 },  // I: Usage
-      { width: 12 },  // J: Fill
-      { width: 14 },  // K: Efficiency
-      { width: 14 }   // L: Cost
+      { width: 14 },  // F: Opening Fuel (Total)
+      { width: 14 },  // G: Opening Fuel T1
+      { width: 14 },  // H: Opening Fuel T2
+      { width: 16 },  // I: Closing Percentage
+      { width: 14 },  // J: Closing Fuel (Total)
+      { width: 14 },  // K: Closing Fuel T1
+      { width: 14 },  // L: Closing Fuel T2
+      { width: 12 },  // M: Usage
+      { width: 12 },  // N: Fill (Total)
+      { width: 12 },  // O: Fill (T1)
+      { width: 12 },  // P: Fill (T2)
+      { width: 14 },  // Q: Efficiency
+      { width: 14 }   // R: Cost
     ];
     
     worksheet.properties.defaultRowHeight = 20;
@@ -429,7 +435,7 @@ class EnergyRiteExcelReportGenerator {
     const workbook = worksheet.workbook;
     
     // Logo space (rows 1-6)
-    worksheet.mergeCells('A1:L6');
+    worksheet.mergeCells('A1:R6');
     const logoCell = worksheet.getCell('A1');
     logoCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1A1A1A' } };
     
@@ -458,7 +464,7 @@ class EnergyRiteExcelReportGenerator {
     logoCell.alignment = { horizontal: 'left', vertical: 'middle' };
     
     // Title with professional styling
-    worksheet.mergeCells('A7:L7');
+    worksheet.mergeCells('A7:R7');
     const titleCell = worksheet.getCell('A7');
     titleCell.value = 'FUEL REPORT SUMMARY';
     titleCell.font = { size: 22, bold: true, color: { argb: 'FFFFFFFF' } };
@@ -470,7 +476,7 @@ class EnergyRiteExcelReportGenerator {
     };
     
     // Period with accent styling
-    worksheet.mergeCells('A8:L8');
+    worksheet.mergeCells('A8:R8');
     const periodCell = worksheet.getCell('A8');
     periodCell.value = `Report Period: ${periodName}`;
     periodCell.font = { size: 14, bold: true, color: { argb: 'FF333333' } };
@@ -498,11 +504,17 @@ class EnergyRiteExcelReportGenerator {
       'Date',
       'Operating Hours',
       'Opening Percentage',
-      'Opening Fuel',
+      'Opening Fuel (Total)',
+      'Opening Fuel (T1)',
+      'Opening Fuel (T2)',
       'Closing Percentage', 
-      'Closing Fuel',
+      'Closing Fuel (Total)',
+      'Closing Fuel (T1)',
+      'Closing Fuel (T2)',
       'Usage',
-      'Fill',
+      'Fill (Total)',
+      'Fill (T1)',
+      'Fill (T2)',
       'Liters Used Per Hour',
       'Cost'
     ]);
@@ -532,9 +544,11 @@ class EnergyRiteExcelReportGenerator {
         site.branch,
         `${site.total_sessions} sessions`,
         this.formatDuration(site.total_operating_hours || 0),
-        '', '', '', '',
+        '', '', '', '', '', '', '', '',
         (site.total_fuel_usage || 0).toFixed(2),
         (site.total_fuel_filled || 0).toFixed(2),
+        '',
+        '',
         (site.avg_efficiency || 0).toFixed(2),
         site.total_cost > 0 && site.total_fuel_usage > 0 ? `@R${(site.total_cost / site.total_fuel_usage).toFixed(2)} = R${(site.total_cost || 0).toFixed(2)}` : 'R0.00'
       ]);
@@ -579,10 +593,16 @@ class EnergyRiteExcelReportGenerator {
             operatingHoursWithTime,
             `${(session.opening_percentage || 0).toFixed(0)}%`,
             `${(session.opening_fuel || 0).toFixed(1)}L`,
+            `${(session.opening_fuel_probe_1 || 0).toFixed(1)}L`,
+            `${(session.opening_fuel_probe_2 || 0).toFixed(1)}L`,
             `${(session.closing_percentage || 0).toFixed(0)}%`,
             `${(session.closing_fuel || 0).toFixed(1)}L`,
+            `${(session.closing_fuel_probe_1 || 0).toFixed(1)}L`,
+            `${(session.closing_fuel_probe_2 || 0).toFixed(1)}L`,
             `${(session.total_usage || 0).toFixed(2)}L`,
             `${(session.total_fill || 0).toFixed(2)}L`,
+            '',
+            '',
             `${(session.liter_usage_per_hour || (session.operating_hours > 0 ? session.total_usage / session.operating_hours : 0)).toFixed(2)}L/h`,
             `@R${(session.cost_per_liter || 0).toFixed(2)} = R${(session.cost_for_usage || 0).toFixed(2)}`
           ]);
@@ -610,19 +630,32 @@ class EnergyRiteExcelReportGenerator {
         }
       }
       
-      // Add individual fuel fill rows, one row per fill session
+      // Add individual fuel fill rows, grouped in 2-hour windows
       if (site.fills.length > 0) {
         // Sort fills by start time (earliest first)
         const sortedFills = [...site.fills].sort((a, b) => 
           new Date(a.session_start_time) - new Date(b.session_start_time)
         );
-        
+        const twoHoursMs = 2 * 60 * 60 * 1000;
+        let windowStart = null;
+        let windowEnd = null;
+        let fillIndexInWindow = 0;
+
         for (const fill of sortedFills) {
+          const fillStartMs = new Date(fill.session_start_time).getTime();
+
+          if (windowStart === null || fillStartMs - windowStart >= twoHoursMs) {
+            windowStart = fillStartMs;
+            windowEnd = windowStart + twoHoursMs;
+            fillIndexInWindow = 0;
+          }
+
+          fillIndexInWindow += 1;
           const startTime = new Date(fill.session_start_time).toLocaleTimeString('en-GB', { hour12: false });
           const endTime = fill.session_end_time ? new Date(fill.session_end_time).toLocaleTimeString('en-GB', { hour12: false }) : 'Ongoing';
           const timeRange = `From: ${startTime}    To: ${endTime}`;
           const fillDurationWithTime = `${fill.duration_formatted || this.formatDuration(fill.operating_hours || 0)}\n${timeRange}`;
-          const fillLabel = `  + Fill ${sortedFills.indexOf(fill) + 1}`;
+          const fillLabel = `  + Fill ${fillIndexInWindow}`;
           
           const fillRow = worksheet.addRow([
             '',
@@ -631,10 +664,16 @@ class EnergyRiteExcelReportGenerator {
             fillDurationWithTime,
             `${(fill.opening_percentage || 0).toFixed(0)}%`,
             `${(fill.opening_fuel || 0).toFixed(1)}L`,
+            `${(fill.opening_fuel_probe_1 || 0).toFixed(1)}L`,
+            `${(fill.opening_fuel_probe_2 || 0).toFixed(1)}L`,
             `${(fill.closing_percentage || 0).toFixed(0)}%`,
             `${(fill.closing_fuel || 0).toFixed(1)}L`,
+            `${(fill.closing_fuel_probe_1 || 0).toFixed(1)}L`,
+            `${(fill.closing_fuel_probe_2 || 0).toFixed(1)}L`,
             '0.00L',
             `${(fill.total_fill || 0).toFixed(2)}L`,
+            `${(Math.max(0, (fill.closing_fuel_probe_1 || 0) - (fill.opening_fuel_probe_1 || 0))).toFixed(2)}L`,
+            `${(Math.max(0, (fill.closing_fuel_probe_2 || 0) - (fill.opening_fuel_probe_2 || 0))).toFixed(2)}L`,
             'N/A',
             'R0.00'
           ]);
@@ -697,10 +736,10 @@ class EnergyRiteExcelReportGenerator {
       `${reportType.toUpperCase()} TOTALS`,
       `${sessionsData.totalSessions} sessions`,
       this.formatDuration(sessionsData.totalOperatingHours),
-      '', '', '', '',
+      '', '', '', '', '', '', '', '',
       sessionsData.sites.reduce((sum, site) => sum + site.total_fuel_usage, 0).toFixed(2),
       sessionsData.sites.reduce((sum, site) => sum + site.total_fuel_filled, 0).toFixed(2),
-      '',
+      '', '',
       (() => {
         const totalCost = sessionsData.sites.reduce((sum, site) => sum + site.total_cost, 0);
         const totalUsage = sessionsData.sites.reduce((sum, site) => sum + site.total_fuel_usage, 0);
@@ -714,7 +753,7 @@ class EnergyRiteExcelReportGenerator {
       '',
       'BREAKDOWN:',
       `${sessionsData.totalSessions} operating sessions, ${sessionsData.totalFills || 0} fuel fills`,
-      '', '', '', '', '', '', '', '', ''
+      '', '', '', '', '', '', '', '', '', '', '', '', ''
     ]);
     
     // Style breakdown row

@@ -16,6 +16,33 @@ const FUEL_FILL_CONFIG = {
     MIN_PERCENTAGE_INCREASE: 2.0
 };
 
+function parseNumeric(value) {
+    const parsed = parseFloat(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function buildSessionFuelFields(prefix, fuelData = {}) {
+    const probe1Fuel = parseNumeric(fuelData.fuel_probe_1_volume_in_tank);
+    const probe2Fuel = parseNumeric(fuelData.fuel_probe_2_volume_in_tank);
+    const probe1Percentage = parseNumeric(fuelData.fuel_probe_1_level_percentage);
+    const probe2Percentage = parseNumeric(fuelData.fuel_probe_2_level_percentage);
+    const percentages = [];
+
+    if (fuelData.fuel_probe_1_level_percentage !== undefined) percentages.push(probe1Percentage);
+    if (fuelData.fuel_probe_2_level_percentage !== undefined) percentages.push(probe2Percentage);
+
+    return {
+        [`${prefix}_fuel`]: probe1Fuel + probe2Fuel,
+        [`${prefix}_percentage`]: percentages.length > 0
+            ? percentages.reduce((sum, value) => sum + value, 0) / percentages.length
+            : 0,
+        [`${prefix}_fuel_probe_1`]: probe1Fuel,
+        [`${prefix}_fuel_probe_2`]: probe2Fuel,
+        [`${prefix}_percentage_probe_1`]: probe1Percentage,
+        [`${prefix}_percentage_probe_2`]: probe2Percentage
+    };
+}
+
 /**
  * Detect fuel fill based on fuel level increase
  * @param {string} plate - Vehicle plate number
@@ -104,11 +131,11 @@ async function detectFuelFill(plate, currentFuelLevel, driverName, fuelData = {}
                     session_start_time: new Date().toISOString(),
                     session_end_time: new Date().toISOString(),
                     operating_hours: 0,
-                    opening_percentage: currentFuelData.fuel_probe_1_level_percentage || 0,
+                    ...buildSessionFuelFields('opening', currentFuelData),
                     opening_fuel: fuelBefore,
                     opening_volume: currentFuelData.fuel_probe_1_volume_in_tank || 0,
                     opening_temperature: currentFuelData.fuel_probe_1_temperature || 0,
-                    closing_percentage: currentFuelData.fuel_probe_1_level_percentage || 0,
+                    ...buildSessionFuelFields('closing', currentFuelData),
                     closing_fuel: parsedCurrentFuel,
                     closing_volume: currentFuelData.fuel_probe_1_volume_in_tank || 0,
                     closing_temperature: currentFuelData.fuel_probe_1_temperature || 0,
