@@ -637,20 +637,18 @@ class EnergyRiteExcelReportGenerator {
           new Date(a.session_start_time) - new Date(b.session_start_time)
         );
         const twoHoursMs = 2 * 60 * 60 * 1000;
-        let windowStart = null;
-        let windowEnd = null;
+        let previousFillStartMs = null;
         let fillIndexInWindow = 0;
 
         for (const fill of sortedFills) {
           const fillStartMs = new Date(fill.session_start_time).getTime();
 
-          if (windowStart === null || fillStartMs - windowStart >= twoHoursMs) {
-            windowStart = fillStartMs;
-            windowEnd = windowStart + twoHoursMs;
+          if (previousFillStartMs === null || fillStartMs - previousFillStartMs > twoHoursMs) {
             fillIndexInWindow = 0;
           }
 
           fillIndexInWindow += 1;
+          previousFillStartMs = fillStartMs;
           const startTime = new Date(fill.session_start_time).toLocaleTimeString('en-GB', { hour12: false });
           const endTime = fill.session_end_time ? new Date(fill.session_end_time).toLocaleTimeString('en-GB', { hour12: false }) : 'Ongoing';
           const timeRange = `From: ${startTime}    To: ${endTime}`;

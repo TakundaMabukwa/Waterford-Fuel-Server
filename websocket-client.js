@@ -562,6 +562,10 @@ class EnergyRiteWebSocketClient {
       
       // Ignore if vehicle is moving (speed >= 10 km/h)
       if (speed >= 10) {
+        if (pendingFuelDb.getPreFillWatcher(plate)) {
+          pendingFuelDb.deletePreFillWatcher(plate);
+          console.log(`[prefill] Cleared pre-fill watcher for ${plate} because vehicle is moving (${speed} km/h)`);
+        }
         return;
       }
       
@@ -575,6 +579,10 @@ class EnergyRiteWebSocketClient {
       
       const engineIsOff = !sessions || sessions.length === 0;
       if (!engineIsOff) {
+        if (pendingFuelDb.getPreFillWatcher(plate)) {
+          pendingFuelDb.deletePreFillWatcher(plate);
+          console.log(`[prefill] Cleared pre-fill watcher for ${plate} because engine is ON`);
+        }
         return; // Only detect changes when engine/ignition is OFF
       }
       
@@ -608,6 +616,10 @@ class EnergyRiteWebSocketClient {
           console.log(`📉 Theft watcher: ${plate} lowest now ${currentFuel}L`);
         }
         return;
+      }
+
+      if (currentFuel > 0) {
+        this.trackPreFillLowest(plate, fuelData, locTime);
       }
       
       // Look at the last 2 minutes of off-engine fuel history so fills/thefts can
@@ -836,6 +848,7 @@ class EnergyRiteWebSocketClient {
       // Get fuel data - prioritize pre-fill watcher (tracks true lowest)
       let openingFuel, openingPercentage;
       let openingFuelProbe1, openingFuelProbe2, openingPercentageProbe1, openingPercentageProbe2;
+      let openingLocTime;
       const preFill = pendingFuelDb.getPreFillWatcher(plate);
       const closestFuel = this.findClosestFuelDataBefore(plate, vehicleData.LocTime);
       
@@ -851,6 +864,7 @@ class EnergyRiteWebSocketClient {
         openingFuelProbe2 = preFill.lowest_fuel_probe_2;
         openingPercentageProbe1 = preFill.lowest_percentage_probe_1;
         openingPercentageProbe2 = preFill.lowest_percentage_probe_2;
+        openingLocTime = preFill.lowest_loc_time;
         console.log(`⛽ FUEL FILL START: ${plate} - Using pre-fill lowest: ${openingFuel}L (tracked since ${preFill.lowest_loc_time})`);
         // Delete watcher ONLY after successfully using it
         pendingFuelDb.deletePreFillWatcher(plate);
@@ -861,6 +875,7 @@ class EnergyRiteWebSocketClient {
         openingFuelProbe2 = closestFuel.fuel_probe_2_volume_in_tank;
         openingPercentageProbe1 = closestFuel.fuel_probe_1_level_percentage;
         openingPercentageProbe2 = closestFuel.fuel_probe_2_level_percentage;
+        openingLocTime = closestFuel.locTime;
         console.log(`⛽ FUEL FILL START: ${plate} - Using closest fuel before status: ${openingFuel}L`);
       } else if (hasFuelData) {
         const currentFuelData = this.parseFuelData(vehicleData);
@@ -870,6 +885,7 @@ class EnergyRiteWebSocketClient {
         openingFuelProbe2 = currentFuelData.fuel_probe_2_volume_in_tank;
         openingPercentageProbe1 = currentFuelData.fuel_probe_1_level_percentage;
         openingPercentageProbe2 = currentFuelData.fuel_probe_2_level_percentage;
+        openingLocTime = vehicleData.LocTime;
         console.log(`⛽ FUEL FILL START: ${plate} - Using current fuel: ${openingFuel}L`);
       }
       
@@ -885,7 +901,7 @@ class EnergyRiteWebSocketClient {
 
         pendingFuelDb.setFuelFillWatcher(plate, {
           startTime: currentTime,
-          startLocTime: vehicleData.LocTime,
+          startLocTime: openingLocTime || vehicleData.LocTime,
           openingFuel: openingFuel,
           openingPercentage: openingPercentage,
           openingFuelProbe1,
@@ -1756,6 +1772,10 @@ class EnergyRiteWebSocketClient {
       const currentTime = this.convertLocTime(wsMessage?.LocTime);
       
       if (engineStatus === 'ON') {
+        if (pendingFuelDb.getPreFillWatcher(plate)) {
+          pendingFuelDb.deletePreFillWatcher(plate);
+          console.log(`[prefill] Cleared pre-fill watcher for ${plate} on ENGINE ON`);
+        }
         if (pendingFuelDb.getFuelFillWatcher(plate)) {
           console.log(`[session] Completing active off-engine watcher before ENGINE ON for ${plate}`);
           await this.completeFuelFillWatcher(plate);
