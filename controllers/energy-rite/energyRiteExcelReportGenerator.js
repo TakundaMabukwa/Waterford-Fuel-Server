@@ -639,12 +639,45 @@ class EnergyRiteExcelReportGenerator {
         const twoHoursMs = 2 * 60 * 60 * 1000;
         let previousFillStartMs = null;
         let fillIndexInWindow = 0;
+        let fillWindowIndex = 0;
 
         for (const fill of sortedFills) {
           const fillStartMs = new Date(fill.session_start_time).getTime();
 
           if (previousFillStartMs === null || fillStartMs - previousFillStartMs > twoHoursMs) {
+            fillWindowIndex += 1;
             fillIndexInWindow = 0;
+
+            if (previousFillStartMs !== null) {
+              const spacerRow = worksheet.addRow(new Array(18).fill(''));
+              spacerRow.height = 10;
+              spacerRow.eachCell((cell) => {
+                cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFFFFF' } };
+                cell.border = {};
+              });
+            }
+
+            const windowLabel = `Fill Window ${fillWindowIndex}`;
+            const windowStart = new Date(fill.session_start_time).toLocaleTimeString('en-GB', { hour12: false });
+            const windowRow = worksheet.addRow([
+              '',
+              windowLabel,
+              new Date(fill.session_start_time).toLocaleDateString(),
+              `Grouped fills within 2 hours starting ${windowStart}`,
+              '', '', '', '', '', '', '', '', '', '', '', '', '', ''
+            ]);
+            windowRow.height = 20;
+            windowRow.eachCell((cell, colNumber) => {
+              cell.font = { bold: true, size: 9, color: { argb: 'FF355E3B' } };
+              cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEAF6EC' } };
+              cell.alignment = { horizontal: colNumber === 2 || colNumber === 4 ? 'left' : 'center', vertical: 'middle' };
+              cell.border = {
+                left: { style: 'thin', color: { argb: 'FFD7E9DA' } },
+                right: { style: 'thin', color: { argb: 'FFD7E9DA' } },
+                top: { style: 'thin', color: { argb: 'FFD7E9DA' } },
+                bottom: { style: 'thin', color: { argb: 'FFD7E9DA' } }
+              };
+            });
           }
 
           fillIndexInWindow += 1;
