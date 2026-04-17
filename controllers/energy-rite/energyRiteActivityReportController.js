@@ -1,6 +1,29 @@
 const { supabase } = require('../../supabase-client');
 const activitySnapshots = require('../../helpers/activity-snapshots');
 
+function toPositiveNumber(value) {
+  const parsed = parseFloat(value || 0);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+function calculateProbeUsage(session) {
+  const openingProbe1 = toPositiveNumber(session.opening_fuel_probe_1);
+  const closingProbe1 = toPositiveNumber(session.closing_fuel_probe_1);
+  const openingProbe2 = toPositiveNumber(session.opening_fuel_probe_2);
+  const closingProbe2 = toPositiveNumber(session.closing_fuel_probe_2);
+
+  const probe1Usage = Math.max(0, openingProbe1 - closingProbe1);
+  const probe2Usage = Math.max(0, openingProbe2 - closingProbe2);
+  const combinedUsage = probe1Usage + probe2Usage;
+  const totalUsage = toPositiveNumber(session.total_usage || session.fuel_usage);
+
+  return {
+    fuel_usage_probe_1: probe1Usage,
+    fuel_usage_probe_2: probe2Usage,
+    total_fuel_usage: combinedUsage > 0 ? combinedUsage : totalUsage,
+  };
+}
+
 /**
  * Calculate fuel differences between two snapshots
  */
@@ -61,240 +84,226 @@ class EnergyRiteActivityReportController {
    */
   async getActivityReport(req, res) {
     try {
-      const { 
-        site, 
+      const {
+        site,
+        site_id,
         costCode,
-        costCodes 
+        cost_code,
+        costCodes,
+        date,
+        start_date,
+        end_date
       } = req.query;
 
-      // Month-to-date system: end date is always yesterday
-      const yesterday = new Date();
-      yesterday.setDate(yesterday.getDate() - 1);
-      const end = yesterday.toISOString().split('T')[0];
-      
-      // Start date is the 1st of the current month
-      const today = new Date();
-      const startDate = new Date(today.getFullYear(), today.getMonth(), 1);
-      const start = startDate.toISOString().split('T')[0];
+      const requestedSite = site_id || site || null;
+      const requestedCostCode = cost_code || costCode || null;
+      const start = start_date || date || new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().split('T')[0];
+      const end = end_date || date || start;
 
-      // Get all sites with cost codes
-      const { data: allVehicles } = await supabase
-        .from('energyrite_vehicle_lookup')
-        .select('plate, cost_code');
-      
+      const costCenterAccess = require('../../helpers/cost-center-access');
+      let allSites = [];
       const costCodeMap = {};
-      allVehicles?.forEach(v => {
-        costCodeMap[v.plate] = v.cost_code;
-      });
 
-      // Filter sites by cost code with hierarchical access
-      let sitesToInclude = Object.keys(costCodeMap);
-      if (costCode || costCodes) {
-        const costCenterAccess = require('../../helpers/cost-center-access');
+      if (requestedSite) {
+        const { data: siteData } = await supabase
+          .from('energyrite_vehicle_lookup')
+          .select('plate, cost_code')
+          .eq('plate', requestedSite)
+          .single();
+
+        if (siteData) {
+          allSites = [siteData.plate];
+          costCodeMap[siteData.plate] = siteData.cost_code;
+        }
+      }
+
+      if ((!requestedSite || allSites.length === 0) && (requestedCostCode || costCodes)) {
         let accessibleCostCodes = [];
-        
+
         if (costCodes) {
-          const codeArray = costCodes.split(',').map(c => c.trim());
+          const codeArray = String(costCodes).split(',').map(c => c.trim()).filter(Boolean);
           for (const code of codeArray) {
             const accessible = await costCenterAccess.getAccessibleCostCenters(code);
             accessibleCostCodes.push(...accessible);
           }
-        } else if (costCode) {
-          accessibleCostCodes = await costCenterAccess.getAccessibleCostCenters(costCode);
+        } else if (requestedCostCode) {
+          accessibleCostCodes = await costCenterAccess.getAccessibleCostCenters(requestedCostCode);
         }
-        
-        console.log('Accessible cost codes:', accessibleCostCodes);
-        console.log('Total vehicles:', allVehicles?.length);
-        
-        sitesToInclude = allVehicles
-          .filter(v => v.cost_code && accessibleCostCodes.includes(v.cost_code))
-          .map(v => v.plate);
-        
-        console.log('Sites to include after filtering:', sitesToInclude.length);
-      }
-      if (site) {
-        sitesToInclude = sitesToInclude.filter(s => s === site);
+
+        accessibleCostCodes = [...new Set(accessibleCostCodes)];
+
+        const { data: vehicleLookup, error: lookupError } = await supabase
+          .from('energyrite_vehicle_lookup')
+          .select('plate, cost_code')
+          .in('cost_code', accessibleCostCodes);
+
+        if (lookupError) throw new Error(`Lookup error: ${lookupError.message}`);
+        allSites = (vehicleLookup || []).map(v => v.plate);
+        (vehicleLookup || []).forEach(v => {
+          costCodeMap[v.plate] = v.cost_code;
+        });
+      } else if (!requestedSite && !requestedCostCode && !costCodes) {
+        const { data: vehicleLookup, error: lookupError } = await supabase
+          .from('energyrite_vehicle_lookup')
+          .select('plate, cost_code');
+
+        if (lookupError) throw new Error(`Lookup error: ${lookupError.message}`);
+        allSites = (vehicleLookup || []).map(v => v.plate);
+        (vehicleLookup || []).forEach(v => {
+          costCodeMap[v.plate] = v.cost_code;
+        });
       }
 
-      // Get snapshots for time slot analysis
-      const { data: snapshots } = await supabase
-        .from('energy_rite_activity_snapshots')
-        .select('*')
-        .gte('snapshot_date', start)
-        .lte('snapshot_date', end)
-        .order('snapshot_time', { ascending: true });
+      const initializeSiteReport = (siteName, fallbackCostCode = null) => ({
+        generator: siteName,
+        branch: siteName,
+        cost_code: costCodeMap[siteName] || fallbackCostCode || requestedCostCode || '',
+        company: 'KFC',
+        start_time: null,
+        end_time: null,
+        morning_to_afternoon_usage: 0,
+        afternoon_to_evening_usage: 0,
+        morning_to_evening_usage: 0,
+        peak_time_slot: 'morning_to_afternoon',
+        peak_fuel_usage: 0,
+        total_fuel_usage: 0,
+        total_fuel_usage_probe_1: 0,
+        total_fuel_usage_probe_2: 0,
+        total_sessions: 0,
+        session_count: 0,
+        total_operating_hours: 0,
+        total_fuel_filled: 0,
+        peak_usage_session: null,
+        period_breakdown: {
+          morning_to_afternoon: 0,
+          afternoon_to_evening: 0,
+          full_day_total: 0
+        }
+      });
 
-      // Initialize site reports
       const siteReports = {};
-      sitesToInclude.forEach(siteName => {
-        siteReports[siteName] = {
-          generator: siteName,
-          cost_code: costCodeMap[siteName],
-          company: 'KFC',
-          morning_fuel: 0,
-          afternoon_fuel: 0,
-          evening_fuel: 0,
-          peak_time_slot: null,
-          peak_fuel_usage: 0,
-          total_fuel_usage: 0,
-          total_sessions: 0,
-          total_operating_hours: 0
-        };
+      allSites.forEach(siteName => {
+        siteReports[siteName] = initializeSiteReport(siteName);
       });
 
-      // Group snapshots by date and time slot for fuel difference calculations
-      const dailySnapshots = {};
-      
-      snapshots?.forEach(snapshot => {
-        const date = snapshot.snapshot_date;
-        const timeSlot = snapshot.time_slot;
-        
-        if (!dailySnapshots[date]) {
-          dailySnapshots[date] = { morning: null, afternoon: null, evening: null };
-        }
-        
-        dailySnapshots[date][timeSlot] = snapshot;
-      });
-      
-      // Calculate fuel usage differences for all 3 periods
-      const timeSlotTotals = { 
-        morning_to_afternoon: 0, 
+      let sessionsQuery = supabase
+        .from('energy_rite_operating_sessions')
+        .select('*')
+        .in('session_status', ['COMPLETED', 'ONGOING'])
+        .gte('session_date', start)
+        .lte('session_date', end);
+
+      let fillsQuery = supabase
+        .from('energy_rite_operating_sessions')
+        .select('*')
+        .eq('session_status', 'FUEL_FILL_COMPLETED')
+        .gte('session_date', start)
+        .lte('session_date', end);
+
+      if (allSites.length > 0 && (requestedSite || requestedCostCode || costCodes)) {
+        sessionsQuery = sessionsQuery.in('branch', allSites);
+        fillsQuery = fillsQuery.in('branch', allSites);
+      }
+
+      const [sessionsResult, fillsResult] = await Promise.all([
+        sessionsQuery.order('session_start_time', { ascending: true }),
+        fillsQuery.order('session_start_time', { ascending: true })
+      ]);
+
+      if (sessionsResult.error) throw new Error(`Sessions error: ${sessionsResult.error.message}`);
+      if (fillsResult.error) throw new Error(`Fills error: ${fillsResult.error.message}`);
+
+      const sessions = sessionsResult.data || [];
+      const fills = fillsResult.data || [];
+
+      const timeSlotTotals = {
+        morning_to_afternoon: 0,
         afternoon_to_evening: 0,
-        morning_to_evening: 0  // Full day comparison
+        morning_to_evening: 0
       };
-      
-      Object.values(dailySnapshots).forEach(daySnapshots => {
-        const { morning, afternoon, evening } = daySnapshots;
-        
-        // Process morning to afternoon differences (6AM to 12PM)
-        if (morning && afternoon) {
-          calculateFuelDifferences(morning, afternoon, siteReports, sitesToInclude, costCodeMap, 'morning_to_afternoon', timeSlotTotals);
-        }
-        
-        // Process afternoon to evening differences (12PM to 6PM)
-        if (afternoon && evening) {
-          calculateFuelDifferences(afternoon, evening, siteReports, sitesToInclude, costCodeMap, 'afternoon_to_evening', timeSlotTotals);
-        }
-        
-        // Process full day differences (6AM to 6PM)
-        if (morning && evening) {
-          calculateFuelDifferences(morning, evening, siteReports, sitesToInclude, costCodeMap, 'morning_to_evening', timeSlotTotals);
-        }
-      });
 
-      // Get session data - filter by joining with lookup table for cost_code
-      let sessions = [];
-      
-      if (costCode || costCodes) {
-        const costCenterAccess = require('../../helpers/cost-center-access');
-        let accessibleCostCodes = [];
-        
-        if (costCodes) {
-          const codeArray = costCodes.split(',').map(c => c.trim());
-          for (const code of codeArray) {
-            const accessible = await costCenterAccess.getAccessibleCostCenters(code);
-            accessibleCostCodes.push(...accessible);
-          }
-        } else if (costCode) {
-          accessibleCostCodes = await costCenterAccess.getAccessibleCostCenters(costCode);
-        }
-        
-        // Get vehicles with matching cost codes
-        const vehiclesWithCostCode = allVehicles
-          .filter(v => v.cost_code && accessibleCostCodes.includes(v.cost_code))
-          .map(v => v.plate);
-        
-        if (vehiclesWithCostCode.length > 0) {
-          const { data } = await supabase
-            .from('energy_rite_operating_sessions')
-            .select('*')
-            .gte('session_date', start)
-            .lte('session_date', end)
-            .eq('session_status', 'COMPLETED')
-            .in('branch', vehiclesWithCostCode);
-          sessions = data || [];
-        }
-      } else {
-        const { data } = await supabase
-          .from('energy_rite_operating_sessions')
-          .select('*')
-          .gte('session_date', start)
-          .lte('session_date', end)
-          .eq('session_status', 'COMPLETED');
-        sessions = data || [];
-      }
-      
-      if (site) {
-        sessions = sessions.filter(s => s.branch === site);
-      }
+      const getTimeSlot = (timestamp) => {
+        const match = String(timestamp || '').match(/T(\d{2}):/);
+        const hour = match ? parseInt(match[1], 10) : 0;
+        return hour < 12 ? 'morning_to_afternoon' : 'afternoon_to_evening';
+      };
 
-      // Process sessions for additional metrics - create site reports dynamically
-      sessions?.forEach(session => {
+      sessions.forEach(session => {
         const siteName = session.branch;
-        
-        // Create site report if it doesn't exist
         if (!siteReports[siteName]) {
-          siteReports[siteName] = {
-            generator: siteName,
-            cost_code: costCodeMap[siteName] || session.cost_code,
-            company: 'KFC',
-            morning_fuel: 0,
-            afternoon_fuel: 0,
-            evening_fuel: 0,
-            peak_time_slot: null,
-            peak_fuel_usage: 0,
-            total_fuel_usage: 0,
-            total_sessions: 0,
-            total_operating_hours: 0
-          };
+          siteReports[siteName] = initializeSiteReport(siteName, session.cost_code);
         }
-        
-        siteReports[siteName].total_sessions++;
-        siteReports[siteName].total_operating_hours += parseFloat(session.operating_hours || 0);
-        siteReports[siteName].total_fuel_usage += parseFloat(session.total_usage || 0);
+
+        const report = siteReports[siteName];
+        const probeUsage = calculateProbeUsage(session);
+        const totalUsage = probeUsage.total_fuel_usage;
+        const slot = getTimeSlot(session.session_start_time);
+
+        report.total_sessions += 1;
+        report.session_count += 1;
+        report.total_operating_hours += parseFloat(session.operating_hours || 0);
+        report.total_fuel_usage += totalUsage;
+        report.total_fuel_usage_probe_1 += probeUsage.fuel_usage_probe_1;
+        report.total_fuel_usage_probe_2 += probeUsage.fuel_usage_probe_2;
+        report[slot] += totalUsage;
+        report.morning_to_evening_usage += totalUsage;
+        report.period_breakdown.morning_to_afternoon = report.morning_to_afternoon_usage;
+        report.period_breakdown.afternoon_to_evening = report.afternoon_to_evening_usage;
+        report.period_breakdown.full_day_total = report.morning_to_evening_usage;
+
+        timeSlotTotals[slot] += totalUsage;
+        timeSlotTotals.morning_to_evening += totalUsage;
+
+        if (session.session_start_time && (!report.start_time || new Date(session.session_start_time) < new Date(report.start_time))) {
+          report.start_time = session.session_start_time;
+        }
+
+        if (session.session_status === 'ONGOING' || !session.session_end_time) {
+          report.end_time = null;
+        } else if (report.end_time !== null && (!report.end_time || new Date(session.session_end_time) > new Date(report.end_time))) {
+          report.end_time = session.session_end_time;
+        } else if (report.end_time === null && report.total_sessions === 1 && session.session_end_time) {
+          report.end_time = session.session_end_time;
+        }
+
+        if (totalUsage > (report.peak_fuel_usage || 0)) {
+          report.peak_fuel_usage = totalUsage;
+          report.peak_usage_session = session.session_start_time;
+          report.peak_time_slot = slot;
+        }
       });
 
-      // Calculate peak time slot and total fuel usage for each site
+      fills.forEach(fill => {
+        const siteName = fill.branch;
+        if (!siteReports[siteName]) {
+          siteReports[siteName] = initializeSiteReport(siteName, fill.cost_code);
+        }
+        siteReports[siteName].total_fuel_filled += parseFloat(fill.total_fill || 0);
+      });
+
       Object.values(siteReports).forEach(report => {
-        const periods = {
-          morning_to_afternoon: report.morning_to_afternoon_usage || 0,
-          afternoon_to_evening: report.afternoon_to_evening_usage || 0,
-          morning_to_evening: report.morning_to_evening_usage || 0
-        };
-        
-        // Find which 6-hour period had the most usage
-        const peakPeriod = Object.entries(periods)
-          .filter(([key]) => key !== 'morning_to_evening') // Exclude full day for peak comparison
-          .sort(([,a], [,b]) => b - a)[0];
-        
-        report.peak_time_slot = peakPeriod[0];
-        report.peak_fuel_usage = peakPeriod[1];
-        report.total_fuel_usage = report.morning_to_evening_usage || 0; // Use full day total
-        
-        // Add period breakdown for detailed analysis
-        report.period_breakdown = {
-          morning_to_afternoon: report.morning_to_afternoon_usage || 0,
-          afternoon_to_evening: report.afternoon_to_evening_usage || 0,
-          full_day_total: report.morning_to_evening_usage || 0
-        };
+        if (!report.end_time) {
+          const hasOngoingSession = sessions.some(session => session.branch === report.branch && (session.session_status === 'ONGOING' || !session.session_end_time));
+          if (!hasOngoingSession) {
+            const completedEndTimes = sessions
+              .filter(session => session.branch === report.branch && session.session_end_time)
+              .map(session => session.session_end_time)
+              .sort();
+            if (completedEndTimes.length > 0) {
+              report.end_time = completedEndTimes[completedEndTimes.length - 1];
+            }
+          }
+        }
       });
 
-      // Overall peak time slot (comparing 6-hour periods only)
-      const periodComparison = {
+      const overallPeakSlot = Object.entries({
         morning_to_afternoon: timeSlotTotals.morning_to_afternoon,
         afternoon_to_evening: timeSlotTotals.afternoon_to_evening
-      };
-      
-      const overallPeakSlot = Object.entries(periodComparison)
-        .sort(([,a], [,b]) => b - a)[0] || ['morning_to_afternoon', 0];
+      }).sort(([, a], [, b]) => b - a)[0] || ['morning_to_afternoon', 0];
 
       const reportData = Object.values(siteReports)
-        .filter(report => 
-          (report.morning_to_afternoon_usage || 0) > 0 || 
-          (report.afternoon_to_evening_usage || 0) > 0 ||
-          (report.total_sessions || 0) > 0
-        )
-        .sort((a, b) => b.total_fuel_usage - a.total_fuel_usage);
+        .filter(report => report.total_sessions > 0 || report.total_fuel_filled > 0 || report.total_operating_hours > 0)
+        .sort((a, b) => (b.total_fuel_usage || 0) - (a.total_fuel_usage || 0));
 
       res.status(200).json({
         success: true,
@@ -315,8 +324,13 @@ class EnergyRiteActivityReportController {
               peak_period: overallPeakSlot[0],
               peak_usage: overallPeakSlot[1]
             },
-            total_sessions: reportData.reduce((sum, r) => sum + r.total_sessions, 0),
-            total_operating_hours: reportData.reduce((sum, r) => sum + r.total_operating_hours, 0)
+            total_sites: reportData.length,
+            total_sessions: reportData.reduce((sum, r) => sum + (r.total_sessions || 0), 0),
+            total_operating_hours: reportData.reduce((sum, r) => sum + (r.total_operating_hours || 0), 0),
+            total_fuel_usage: reportData.reduce((sum, r) => sum + (r.total_fuel_usage || 0), 0),
+            total_fuel_usage_probe_1: reportData.reduce((sum, r) => sum + (r.total_fuel_usage_probe_1 || 0), 0),
+            total_fuel_usage_probe_2: reportData.reduce((sum, r) => sum + (r.total_fuel_usage_probe_2 || 0), 0),
+            total_fuel_filled: reportData.reduce((sum, r) => sum + (r.total_fuel_filled || 0), 0)
           }
         },
         timestamp: new Date().toISOString()
