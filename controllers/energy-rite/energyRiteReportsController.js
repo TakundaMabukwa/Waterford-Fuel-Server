@@ -525,8 +525,32 @@ class EnergyRiteReportsController {
   // Activity Report - Daily snapshot of activity for selected date and cost center
   async getActivityReport(req, res) {
     try {
-      const { date, cost_code, site_id } = req.query;
-      const targetDate = date || new Date().toISOString().split('T')[0];
+      const { date, start_date, end_date, startDate, endDate, cost_code, site_id } = req.query;
+      const today = new Date().toISOString().split('T')[0];
+      const rangeStartDate = start_date || startDate || date || today;
+      const rangeEndDate = end_date || endDate || date || rangeStartDate;
+
+      const isoDatePattern = /^\d{4}-\d{2}-\d{2}$/;
+      if (!isoDatePattern.test(rangeStartDate) || !isoDatePattern.test(rangeEndDate)) {
+        return res.status(400).json({
+          success: false,
+          error: 'Invalid date format',
+          message: 'Use YYYY-MM-DD for date, start_date, and end_date'
+        });
+      }
+
+      if (rangeStartDate > rangeEndDate) {
+        return res.status(400).json({
+          success: false,
+          error: 'Invalid date range',
+          message: 'start_date must be before or equal to end_date'
+        });
+      }
+
+      const isSingleDayRange = rangeStartDate === rangeEndDate;
+      const targetDate = rangeStartDate;
+      const fuelWindowStart = `${rangeStartDate}T00:00:00`;
+      const fuelWindowEnd = `${rangeEndDate}T23:59:59.999`;
       
       // Get operating sessions for the selected date
       let sessionsQuery = supabase
@@ -546,7 +570,8 @@ class EnergyRiteReportsController {
           session_status,
           notes
         `)
-        .eq('session_date', targetDate)
+        .gte('session_date', rangeStartDate)
+        .lte('session_date', rangeEndDate)
         .order('branch')
         .order('session_start_time');
       
@@ -576,7 +601,8 @@ class EnergyRiteReportsController {
       const { data: snapshots, error: snapshotError } = await supabase
         .from('energy_rite_activity_snapshots')
         .select('*')
-        .eq('snapshot_date', targetDate)
+        .gte('snapshot_date', rangeStartDate)
+        .lte('snapshot_date', rangeEndDate)
         .order('snapshot_time');
         
       if (snapshotError) console.log('No snapshots found for date:', snapshotError.message);
@@ -585,8 +611,8 @@ class EnergyRiteReportsController {
       const { data: fuelData, error: fuelError } = await supabase
         .from('energy_rite_fuel_data')
         .select('plate, fuel_probe_1_level, drivername, created_at')
-        .gte('created_at', targetDate)
-        .lt('created_at', new Date(Date.parse(targetDate) + 24 * 60 * 60 * 1000).toISOString())
+        .gte('created_at', fuelWindowStart)
+        .lte('created_at', fuelWindowEnd)
         .order('plate')
         .order('created_at');
         
@@ -596,7 +622,8 @@ class EnergyRiteReportsController {
       let fillSessionsQuery = supabase
         .from('energy_rite_operating_sessions')
         .select('*')
-        .eq('session_date', targetDate)
+        .gte('session_date', rangeStartDate)
+        .lte('session_date', rangeEndDate)
         .eq('session_status', 'FUEL_FILL_COMPLETED')
         .order('session_start_time');
       
@@ -1012,7 +1039,13 @@ class EnergyRiteReportsController {
       res.json({
         success: true,
         data: {
-          date: targetDate,
+          date: isSingleDayRange ? targetDate : `${rangeStartDate} to ${rangeEndDate}`,
+          start_date: rangeStartDate,
+          end_date: rangeEndDate,
+          period: {
+            start_date: rangeStartDate,
+            end_date: rangeEndDate
+          },
           cost_code: cost_code || 'All',
           site_id: site_id,
           summary: summary,
@@ -1050,7 +1083,12 @@ class EnergyRiteReportsController {
             },
             financial_breakdown: financialAnalysis
           },
-          shift_fuel_tracking: await calculateShiftFuelUsage(targetDate, fuelData, cost_code, site_id),
+          shift_fuel_tracking: isSingleDayRange
+            ? await calculateShiftFuelUsage(targetDate, fuelData, cost_code, site_id)
+            : {
+                note: 'Shift fuel tracking is only available for single-day activity reports.',
+                period: { start_date: rangeStartDate, end_date: rangeEndDate }
+              },
           sessions: activitySummary
         }
       });
@@ -1871,235 +1909,306 @@ class EnergyRiteReportsController {
     }
   }
 
-  // Download Daily Activity Report - Uses exact same logic as getDailyReport but for specific date
+  // Download Activity Report - supports single date or date range, with mixed events timeline
   async downloadActivityReport(req, res) {
     try {
       const ExcelJS = require('exceljs');
-      const { date, cost_code, site_id, format = 'excel' } = req.query;
-      
-      // Validate required parameters
-      if (!date) {
+      const { date, start_date, end_date, startDate, endDate, cost_code, site_id, format = 'excel' } = req.query;
+
+      const today = new Date().toISOString().split('T')[0];
+      const rangeStartDate = start_date || startDate || date || today;
+      const rangeEndDate = end_date || endDate || date || rangeStartDate;
+
+      const isoDatePattern = /^\d{4}-\d{2}-\d{2}$/;
+      if (!isoDatePattern.test(rangeStartDate) || !isoDatePattern.test(rangeEndDate)) {
         return res.status(400).json({
           success: false,
-          error: 'Date parameter is required',
-          message: 'Please provide a date in YYYY-MM-DD format'
+          error: 'Invalid date format',
+          message: 'Use YYYY-MM-DD for date, start_date, and end_date'
         });
       }
-      
-      const targetDate = date;
-      
-      // Use EXACT same logic as getDailyReport but for single date instead of month
-      let dailyQuery = supabase
+
+      if (rangeStartDate > rangeEndDate) {
+        return res.status(400).json({
+          success: false,
+          error: 'Invalid date range',
+          message: 'start_date must be before or equal to end_date'
+        });
+      }
+
+      const isSingleDayRange = rangeStartDate === rangeEndDate;
+      const periodLabel = isSingleDayRange ? rangeStartDate : `${rangeStartDate} to ${rangeEndDate}`;
+
+      let filteredBranches = null;
+
+      if (site_id) {
+        filteredBranches = [site_id];
+      } else if (cost_code) {
+        const costCenterAccess = require('../../helpers/cost-center-access');
+        const accessibleCostCodes = await costCenterAccess.getAccessibleCostCenters(cost_code);
+
+        const { data: vehiclesWithCostCode, error: lookupError } = await supabase
+          .from('energyrite_vehicle_lookup')
+          .select('plate')
+          .in('cost_code', accessibleCostCodes);
+
+        if (lookupError) throw new Error(`Lookup error: ${lookupError.message}`);
+        filteredBranches = (vehiclesWithCostCode || []).map(v => v.plate);
+      }
+
+      let operatingQuery = supabase
         .from('energy_rite_operating_sessions')
         .select(`
+          id,
           branch,
-          cost_code,
           company,
+          cost_code,
+          session_start_time,
+          session_end_time,
           operating_hours,
+          opening_fuel,
+          closing_fuel,
           total_usage,
           total_fill,
-          session_status,
-          liter_usage_per_hour,
           cost_for_usage,
-          session_date,
-          session_start_time,
-          session_end_time
+          liter_usage_per_hour,
+          session_status,
+          notes
         `)
-        .eq('session_date', targetDate)  // Only difference: single date instead of date range
-        .eq('session_status', 'COMPLETED');
-      
-      // Apply hierarchical cost code filtering if provided (EXACT same as getDailyReport)
-      if (cost_code) {
-        const costCenterAccess = require('../../helpers/cost-center-access');
-        const accessibleCostCodes = await costCenterAccess.getAccessibleCostCenters(cost_code);
-        dailyQuery = dailyQuery.in('cost_code', accessibleCostCodes);
-      }
-      
-      const { data: dailyData, error: dailyError } = await dailyQuery;
-      if (dailyError) throw new Error(`Database error: ${dailyError.message}`);
-      
-      // Get current fuel levels from latest fuel data (EXACT same as getDailyReport)
-      const { data: currentFuelData, error: fuelError } = await supabase
-        .from('energy_rite_fuel_data')
-        .select('plate, fuel_probe_1_level, drivername, created_at')
-        .order('created_at', { ascending: false });
-        
-      if (fuelError) throw new Error(`Fuel data error: ${fuelError.message}`);
-      
-      // Get latest fuel level per site (EXACT same as getDailyReport)
-      const latestFuelBySite = {};
-      currentFuelData.forEach(record => {
-        if (!latestFuelBySite[record.plate]) {
-          latestFuelBySite[record.plate] = {
-            fuel_level: record.fuel_probe_1_level || 0,
-            engine_status: record.drivername || 'UNKNOWN',
-            last_update: record.created_at
-          };
-        }
-      });
-      
-      // Group daily data by branch (EXACT same logic as getDailyReport)
-      const dailyByBranch = {};
-      dailyData.forEach(session => {
-        if (!dailyByBranch[session.branch]) {
-          dailyByBranch[session.branch] = {
-            branch: session.branch,
-            cost_code: session.cost_code,
-            company: session.company || 'KFC',
-            total_running_hours: 0,
-            total_fuel_usage: 0,
-            total_fuel_filled: 0,
+        .in('session_status', ['COMPLETED', 'ONGOING'])
+        .gte('session_date', rangeStartDate)
+        .lte('session_date', rangeEndDate)
+        .order('session_start_time', { ascending: true });
+
+      let fillsQuery = supabase
+        .from('energy_rite_operating_sessions')
+        .select(`
+          id,
+          branch,
+          company,
+          cost_code,
+          session_start_time,
+          session_end_time,
+          operating_hours,
+          opening_fuel,
+          closing_fuel,
+          total_usage,
+          total_fill,
+          cost_for_usage,
+          liter_usage_per_hour,
+          session_status,
+          notes
+        `)
+        .eq('session_status', 'FUEL_FILL_COMPLETED')
+        .gte('session_date', rangeStartDate)
+        .lte('session_date', rangeEndDate)
+        .order('session_start_time', { ascending: true });
+
+      if (filteredBranches && filteredBranches.length === 0) {
+        const emptyPayload = {
+          date: periodLabel,
+          start_date: rangeStartDate,
+          end_date: rangeEndDate,
+          period: { start_date: rangeStartDate, end_date: rangeEndDate },
+          cost_code: cost_code || 'All',
+          site_id: site_id || null,
+          summary: {
+            total_events: 0,
             total_sessions: 0,
-            completed_sessions: 0,
-            avg_efficiency: 0,
-            total_cost: 0,
-            last_session: null
-          };
+            total_fills: 0,
+            total_operating_hours: 0,
+            total_usage_liters: 0,
+            total_fill_liters: 0,
+            total_liters: 0
+          },
+          events: []
+        };
+
+        if (format === 'json') {
+          return res.status(200).json({ success: true, data: emptyPayload });
         }
-        
-        const branch = dailyByBranch[session.branch];
-        branch.total_running_hours += parseFloat(session.operating_hours || 0);
-        branch.total_fuel_usage += parseFloat(session.total_usage || 0);
-        branch.total_fuel_filled += parseFloat(session.total_fill || 0);
-        branch.total_sessions += 1;
-        branch.completed_sessions += 1;
-        branch.total_cost += parseFloat(session.cost_for_usage || 0);
-        
-        // Track latest session
-        if (!branch.last_session || session.session_end_time > branch.last_session) {
-          branch.last_session = session.session_end_time;
-        }
-      });
-      
-      // Calculate averages (EXACT same as getDailyReport)
-      Object.values(dailyByBranch).forEach(branch => {
-        if (branch.total_running_hours > 0) {
-          branch.avg_efficiency = branch.total_fuel_usage / branch.total_running_hours;
-        }
-      });
-      
-      // Get vehicle lookup with hierarchical cost code filtering (EXACT same as getDailyReport)
-      let vehicleLookupQuery = supabase
-        .from('energyrite_vehicle_lookup')
-        .select('plate, cost_code');
-        
-      if (cost_code) {
-        const costCenterAccess = require('../../helpers/cost-center-access');
-        const accessibleCostCodes = await costCenterAccess.getAccessibleCostCenters(cost_code);
-        vehicleLookupQuery = vehicleLookupQuery.in('cost_code', accessibleCostCodes);
+      } else if (filteredBranches && filteredBranches.length > 0) {
+        operatingQuery = operatingQuery.in('branch', filteredBranches);
+        fillsQuery = fillsQuery.in('branch', filteredBranches);
       }
-      
-      const { data: vehicleLookup, error: lookupError } = await vehicleLookupQuery;
-      if (lookupError) throw new Error(`Lookup error: ${lookupError.message}`);
-      
-      const allSites = new Set();
-      vehicleLookup.forEach(v => allSites.add(v.plate));
-      Object.keys(dailyByBranch).forEach(branch => allSites.add(branch));
-      
-      // Structure the response (EXACT same as getDailyReport but with date instead of month/year)
-      const report = {
-        report_date: new Date(),
-        date: targetDate,
-        period: targetDate,
-        sites: Array.from(allSites).map(site => {
-          const vehicleInfo = vehicleLookup.find(v => v.plate === site);
-          const dailyInfo = dailyByBranch[site];
-          const currentInfo = latestFuelBySite[site];
-          
-          return {
-            branch: site,
-            company: dailyInfo?.company || 'KFC',
-            cost_code: vehicleInfo?.cost_code || 'N/A',
-            current_fuel_level: currentInfo?.fuel_level || 0,
-            current_engine_status: currentInfo?.engine_status || 'UNKNOWN',
-            last_activity: currentInfo?.last_update || dailyInfo?.last_session,
-            daily_data: dailyInfo || {
-              total_running_hours: 0,
-              total_fuel_usage: 0,
-              total_fuel_filled: 0,
-              total_sessions: 0,
-              completed_sessions: 0,
-              avg_efficiency: 0,
-              total_cost: 0
-            }
-          };
-        })
+
+      const [operatingResult, fillsResult] = await Promise.all([operatingQuery, fillsQuery]);
+      if (operatingResult.error) throw new Error(`Operating sessions error: ${operatingResult.error.message}`);
+      if (fillsResult.error) throw new Error(`Fuel fills error: ${fillsResult.error.message}`);
+
+      const operatingSessions = operatingResult.data || [];
+      const fillSessions = fillsResult.data || [];
+
+      const sessionsByVehicle = {};
+      fillSessions.forEach(session => {
+        if (!sessionsByVehicle[session.branch]) {
+          sessionsByVehicle[session.branch] = [];
+        }
+        sessionsByVehicle[session.branch].push(session);
+      });
+
+      const fillEvents = [];
+      Object.keys(sessionsByVehicle).forEach(vehicle => {
+        const combinedFills = combineFuelFills(sessionsByVehicle[vehicle], 2);
+        combinedFills.forEach(fill => {
+          fillEvents.push({
+            id: `fill_${vehicle}_${fill.session_start_time}`,
+            event_type: 'FILL',
+            branch: vehicle,
+            start_time: fill.session_start_time,
+            end_time: fill.session_end_time,
+            duration_hours: parseFloat(fill.duration_hours || 0),
+            fuel_usage: 0,
+            fuel_filled: parseFloat(fill.total_fill || 0),
+            total_liters: parseFloat(fill.total_fill || 0),
+            status: 'FUEL_FILL_COMPLETED',
+            notes: fill.is_combined
+              ? `Combined ${fill.fill_count} fills`
+              : 'Fuel fill completed'
+          });
+        });
+      });
+
+      const sessionEvents = operatingSessions.map(session => {
+        const usage = parseFloat(session.total_usage || 0);
+        const filled = parseFloat(session.total_fill || 0);
+        return {
+          id: session.id || `${session.branch}_${session.session_start_time}`,
+          event_type: 'SESSION',
+          branch: session.branch,
+          start_time: session.session_start_time,
+          end_time: session.session_end_time,
+          duration_hours: parseFloat(session.operating_hours || 0),
+          fuel_usage: usage,
+          fuel_filled: filled,
+          total_liters: usage + filled,
+          status: session.session_status,
+          notes: session.notes || ''
+        };
+      });
+
+      const events = [...sessionEvents, ...fillEvents].sort((a, b) => {
+        const aTime = new Date(a.start_time || 0).getTime();
+        const bTime = new Date(b.start_time || 0).getTime();
+        return aTime - bTime;
+      });
+
+      const summary = {
+        total_events: events.length,
+        total_sessions: sessionEvents.length,
+        total_fills: fillEvents.length,
+        total_operating_hours: sessionEvents.reduce((sum, item) => sum + (item.duration_hours || 0), 0),
+        total_usage_liters: sessionEvents.reduce((sum, item) => sum + (item.fuel_usage || 0), 0),
+        total_fill_liters: fillEvents.reduce((sum, item) => sum + (item.fuel_filled || 0), 0),
+        total_liters: events.reduce((sum, item) => sum + (item.total_liters || 0), 0)
+      };
+
+      const payload = {
+        date: periodLabel,
+        start_date: rangeStartDate,
+        end_date: rangeEndDate,
+        period: { start_date: rangeStartDate, end_date: rangeEndDate },
+        cost_code: cost_code || 'All',
+        site_id: site_id || null,
+        summary,
+        events
       };
 
       if (format === 'json') {
-        // JSON download - EXACT same structure as getDailyReport
-        const filename = `daily-activity-report-${targetDate}${cost_code ? '-' + cost_code : '-all-centers'}${site_id ? '-' + site_id : ''}.json`;
-        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+        const jsonFileName = `activity-report-${rangeStartDate}${isSingleDayRange ? '' : `_to_${rangeEndDate}`}${cost_code ? '-' + cost_code : '-all-centers'}${site_id ? '-' + site_id : ''}.json`;
+        res.setHeader('Content-Disposition', `attachment; filename="${jsonFileName}"`);
         res.setHeader('Content-Type', 'application/json');
-        return res.json({
+        return res.status(200).json({
           success: true,
-          data: report
+          data: payload
         });
       }
 
-      // Excel download - keeping it simple and clean like getDailyReport would be
       const workbook = new ExcelJS.Workbook();
-      
-      // Single sheet: Daily Activity Overview (matching getDailyReport style)
-      const overviewSheet = workbook.addWorksheet('Daily Overview');
-      
-      // Header
-      overviewSheet.mergeCells('A1:H1');
-      const titleCell = overviewSheet.getCell('A1');
-      titleCell.value = 'Daily Activity Report - ' + targetDate;
-      titleCell.font = { size: 16, bold: true };
-      titleCell.alignment = { horizontal: 'center' };
-      
-      overviewSheet.mergeCells('A2:H2');
-      const infoCell = overviewSheet.getCell('A2');
-      infoCell.value = `Date: ${targetDate} | Cost Center: ${cost_code || 'All Centers'}${site_id ? ' | Site: ' + site_id : ''}`;
-      infoCell.font = { size: 12, bold: true };
-      infoCell.alignment = { horizontal: 'center' };
-      
-      // Column headers (matching getDailyReport data structure)
-      const headers = ['Branch', 'Company', 'Cost Code', 'Current Fuel', 'Engine Status', 'Duration (H:M:S)', 'Fuel Usage', 'Total Cost', 'Start Time', 'End Time'];
-      overviewSheet.addRow([]); // Empty row
-      const headerRow = overviewSheet.addRow(headers);
-      headerRow.font = { bold: true };
-      
-      // Data rows
-      report.sites.forEach(site => {
-        const formattedDuration = this.formatDuration(site.daily_data.total_running_hours);
-        const startTime = site.daily_data.first_session_start ? 
-          new Date(site.daily_data.first_session_start).toLocaleString() : 'No sessions';
-        const endTime = site.daily_data.last_session ? 
-          new Date(site.daily_data.last_session).toLocaleString() : 'No sessions';
-        overviewSheet.addRow([
-          site.branch,
-          site.company,
-          site.cost_code,
-          site.current_fuel_level,
-          site.current_engine_status,
-          formattedDuration,
-          site.daily_data.total_fuel_usage,
-          site.daily_data.total_cost,
-          startTime,
-          endTime
+      const worksheet = workbook.addWorksheet('Activity Timeline');
+
+      worksheet.columns = [
+        { width: 16 },
+        { width: 12 },
+        { width: 22 },
+        { width: 22 },
+        { width: 16 },
+        { width: 14 },
+        { width: 14 },
+        { width: 14 },
+        { width: 18 },
+        { width: 40 }
+      ];
+
+      worksheet.mergeCells('A1:J1');
+      worksheet.getCell('A1').value = 'Activity Report Timeline';
+      worksheet.getCell('A1').font = { size: 16, bold: true };
+      worksheet.getCell('A1').alignment = { horizontal: 'center' };
+
+      worksheet.mergeCells('A2:J2');
+      worksheet.getCell('A2').value = `Period: ${periodLabel} | Cost Center: ${cost_code || 'All'}${site_id ? ` | Site: ${site_id}` : ''}`;
+      worksheet.getCell('A2').font = { size: 11, bold: true };
+      worksheet.getCell('A2').alignment = { horizontal: 'center' };
+
+      worksheet.addRow([]);
+
+      const header = worksheet.addRow([
+        'Vehicle',
+        'Type',
+        'Start Date/Time',
+        'End Date/Time',
+        'Operating Hours',
+        'Total Usage (L)',
+        'Fuel Fills (L)',
+        'Total (L)',
+        'Status',
+        'Notes'
+      ]);
+      header.font = { bold: true };
+
+      const formatDateTime = (value) => {
+        if (!value) return 'ONGOING';
+        const dateValue = new Date(value);
+        if (Number.isNaN(dateValue.getTime())) return String(value);
+        return dateValue.toLocaleString('en-ZA', { hour12: false });
+      };
+
+      events.forEach(event => {
+        worksheet.addRow([
+          event.branch,
+          event.event_type,
+          formatDateTime(event.start_time),
+          formatDateTime(event.end_time),
+          this.formatDuration(event.duration_hours || 0),
+          (event.fuel_usage || 0).toFixed(2),
+          (event.fuel_filled || 0).toFixed(2),
+          (event.total_liters || 0).toFixed(2),
+          event.status,
+          event.notes || ''
         ]);
       });
-      
-      // Auto-fit columns with specific widths for time columns
-      overviewSheet.columns.forEach((column, index) => {
-        if (column.header) {
-          // Make time columns wider
-          const isTimeColumn = index >= 8; // Start Time and End Time columns
-          column.width = isTimeColumn ? 20 : Math.max(column.header.length + 2, 15);
-        }
-      });
 
-      // Generate and send Excel file
-      const filename = `daily-activity-report-${targetDate}${cost_code ? '-' + cost_code : '-all-centers'}${site_id ? '-' + site_id : ''}.xlsx`;
-      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      worksheet.addRow([]);
+      const totalsRow = worksheet.addRow([
+        'TOTALS',
+        '',
+        '',
+        '',
+        this.formatDuration(summary.total_operating_hours || 0),
+        summary.total_usage_liters.toFixed(2),
+        summary.total_fill_liters.toFixed(2),
+        summary.total_liters.toFixed(2),
+        '',
+        `${summary.total_events} events`
+      ]);
+      totalsRow.font = { bold: true };
+
+      const excelFileName = `activity-report-${rangeStartDate}${isSingleDayRange ? '' : `_to_${rangeEndDate}`}${cost_code ? '-' + cost_code : '-all-centers'}${site_id ? '-' + site_id : ''}.xlsx`;
+      res.setHeader('Content-Disposition', `attachment; filename="${excelFileName}"`);
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-      
+
       const buffer = await workbook.xlsx.writeBuffer();
       res.send(buffer);
-
     } catch (error) {
       console.error('Error generating download report:', error);
       res.status(500).json({
