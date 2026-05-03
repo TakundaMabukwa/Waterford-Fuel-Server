@@ -406,7 +406,7 @@ class EnergyRiteExcelReportGenerator {
     worksheet.columns = [
       { width: 5 },   // A: Expand button column
       { width: 22 },  // B: Plate
-      { width: 14 },  // C: Date  
+      { width: 20 },  // C: Date + Time
       { width: 28 },  // D: Operating Hours (increased from 16)
       { width: 16 },  // E: Opening Percentage
       { width: 14 },  // F: Opening Fuel (Total)
@@ -421,51 +421,21 @@ class EnergyRiteExcelReportGenerator {
       { width: 12 },  // O: Fill (T1)
       { width: 12 },  // P: Fill (T2)
       { width: 14 },  // Q: Efficiency
-      { width: 14 }   // R: Cost
+      { width: 14 },  // R: Cost
+      { width: 14 },  // S: Total Liters
+      { width: 14 }   // T: Closing Liters
     ];
     
     worksheet.properties.defaultRowHeight = 20;
-    worksheet.views = [{ state: 'frozen', ySplit: 10, showGridLines: false, showOutlineSymbols: true }];
+    worksheet.views = [{ state: 'frozen', ySplit: 5, showGridLines: false, showOutlineSymbols: true }];
   }
   
   /**
-   * Add report header with logo and title
+   * Add report header
    */
   addReportHeader(worksheet, periodName, reportType) {
-    const workbook = worksheet.workbook;
-    
-    // Logo space (rows 1-6)
-    worksheet.mergeCells('A1:R6');
-    const logoCell = worksheet.getCell('A1');
-    logoCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1A1A1A' } };
-    
-    // Try to add logo image
-    const fs = require('fs');
-    const path = require('path');
-    const logoPath = path.join(__dirname, '../../waterford.jpeg');
-    
-    try {
-      if (fs.existsSync(logoPath)) {
-        const logoBuffer = fs.readFileSync(logoPath);
-        const imageId = workbook.addImage({
-          buffer: logoBuffer,
-          extension: 'jpeg'
-        });
-        worksheet.addImage(imageId, {
-          tl: { col: 0.1, row: 0.1 },
-          br: { col: 5.9, row: 5.9 }
-        });
-      }
-    } catch (error) {
-      console.log('Logo not found, using text header');
-    }
-    
-    logoCell.value = '';
-    logoCell.alignment = { horizontal: 'left', vertical: 'middle' };
-    
-    // Title with professional styling
-    worksheet.mergeCells('A7:R7');
-    const titleCell = worksheet.getCell('A7');
+    worksheet.mergeCells('A1:T1');
+    const titleCell = worksheet.getCell('A1');
     titleCell.value = 'FUEL REPORT SUMMARY';
     titleCell.font = { size: 22, bold: true, color: { argb: 'FFFFFFFF' } };
     titleCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF333333' } };
@@ -475,9 +445,8 @@ class EnergyRiteExcelReportGenerator {
       bottom: { style: 'medium', color: { argb: 'FF666666' } }
     };
     
-    // Period with accent styling
-    worksheet.mergeCells('A8:R8');
-    const periodCell = worksheet.getCell('A8');
+    worksheet.mergeCells('A2:T2');
+    const periodCell = worksheet.getCell('A2');
     periodCell.value = `Report Period: ${periodName}`;
     periodCell.font = { size: 14, bold: true, color: { argb: 'FF333333' } };
     periodCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF5F5F5' } };
@@ -485,29 +454,52 @@ class EnergyRiteExcelReportGenerator {
     periodCell.border = {
       bottom: { style: 'thin', color: { argb: 'FFCCCCCC' } }
     };
-    
-    // Empty row with subtle background
-    const emptyRow = worksheet.addRow([]);
-    emptyRow.eachCell((cell) => {
-      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFAFAFA' } };
-    });
+
+    worksheet.mergeCells('A3:T3');
+    const typeCell = worksheet.getCell('A3');
+    typeCell.value = `Report Type: ${String(reportType || '').toUpperCase()}`;
+    typeCell.font = { size: 12, bold: true, color: { argb: 'FF333333' } };
+    typeCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFAFAFA' } };
+    typeCell.alignment = { horizontal: 'center', vertical: 'middle' };
+
+    worksheet.addRow([]);
   }
   
   /**
-   * Add expandable report data with sessions and fills separated
+   * Add report data grouped by day with mixed sessions/fills sorted by time
    */
   async addExpandableReportData(worksheet, sessionsData, reportType) {
-    // Header row
+    const parseNumber = (value) => {
+      const parsed = parseFloat(value);
+      return Number.isFinite(parsed) ? parsed : 0;
+    };
+
+    const formatDate = (value) => {
+      if (!value) return '';
+      return new Date(value).toLocaleDateString('en-GB');
+    };
+
+    const formatTime = (value) => {
+      if (!value) return '';
+      return new Date(value).toLocaleTimeString('en-GB', { hour12: false });
+    };
+
+    const getDateKey = (event) => {
+      if (event.session_date) return event.session_date;
+      if (!event.session_start_time) return '';
+      return new Date(event.session_start_time).toISOString().slice(0, 10);
+    };
+
     const headerRow = worksheet.addRow([
-      '+/-', // Expand button column
-      'Plate',
-      'Date',
+      '+/-',
+      'Plate / Event',
+      'Date & Time',
       'Operating Hours',
       'Opening Percentage',
       'Opening Fuel (Total)',
       'Opening Fuel (T1)',
       'Opening Fuel (T2)',
-      'Closing Percentage', 
+      'Closing Percentage',
       'Closing Fuel (Total)',
       'Closing Fuel (T1)',
       'Closing Fuel (T2)',
@@ -516,10 +508,11 @@ class EnergyRiteExcelReportGenerator {
       'Fill (T1)',
       'Fill (T2)',
       'Liters Used Per Hour',
-      'Cost'
+      'Cost',
+      'Total Liters',
+      'Closing Liters'
     ]);
-    
-    // Style header row with a cleaner fixed header look
+
     headerRow.eachCell((cell) => {
       cell.font = { bold: true, color: { argb: 'FFFFFFFF' }, size: 10 };
       cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF20344A' } };
@@ -532,17 +525,28 @@ class EnergyRiteExcelReportGenerator {
       };
     });
     headerRow.height = 24;
-    
-    // Add data for each site with sessions and fills breakdown
+
+    const overall = {
+      sessions: 0,
+      fills: 0,
+      usageLiters: 0,
+      fillLiters: 0,
+      totalLiters: 0,
+      totalCost: 0
+    };
+
     for (const site of sessionsData.sites) {
-      const hasActivity = site.sessions.length > 0 || site.fills.length > 0;
-      const totalActivities = site.sessions.length + site.fills.length;
-      
-      // Main summary row
+      const mixedEvents = [
+        ...(site.sessions || []).map((session) => ({ ...session, event_type: 'session' })),
+        ...(site.fills || []).map((fill) => ({ ...fill, event_type: 'fill' }))
+      ].sort((a, b) => new Date(a.session_start_time || 0) - new Date(b.session_start_time || 0));
+
+      const hasActivity = mixedEvents.length > 0;
+
       const summaryRow = worksheet.addRow([
-        hasActivity ? '▼' : '',
+        hasActivity ? 'v' : '',
         site.branch,
-        `${site.total_sessions} sessions`,
+        hasActivity ? `${mixedEvents.length} events` : 'No activity',
         this.formatDuration(site.total_operating_hours || 0),
         '', '', '', '', '', '', '', '',
         (site.total_fuel_usage || 0).toFixed(2),
@@ -550,10 +554,11 @@ class EnergyRiteExcelReportGenerator {
         '',
         '',
         (site.avg_efficiency || 0).toFixed(2),
-        site.total_cost > 0 && site.total_fuel_usage > 0 ? `@R${(site.total_cost / site.total_fuel_usage).toFixed(2)} = R${(site.total_cost || 0).toFixed(2)}` : 'R0.00'
+        site.total_cost > 0 && site.total_fuel_usage > 0 ? `@R${(site.total_cost / site.total_fuel_usage).toFixed(2)} = R${(site.total_cost || 0).toFixed(2)}` : 'R0.00',
+        (parseNumber(site.total_fuel_usage) + parseNumber(site.total_fuel_filled)).toFixed(2),
+        ''
       ]);
-      
-      // Style main row as a compact summary band
+
       summaryRow.eachCell((cell, colNumber) => {
         if (colNumber === 1) {
           cell.font = { bold: true, color: { argb: 'FF20344A' }, size: 11 };
@@ -571,212 +576,205 @@ class EnergyRiteExcelReportGenerator {
           right: { style: 'thin', color: { argb: 'FFD7DFE8' } }
         };
       });
-      if (hasActivity) summaryRow.height = 20;
-      
-      // Add individual session rows (sorted by start time)
-      if (site.sessions.length > 0) {
-        // Sort sessions by start time (earliest first)
-        const sortedSessions = [...site.sessions].sort((a, b) => 
-          new Date(a.session_start_time) - new Date(b.session_start_time)
-        );
-        
-        for (const session of sortedSessions) {
-          const startTime = new Date(session.session_start_time).toLocaleTimeString('en-GB', { hour12: false });
-          const endTime = session.session_end_time ? new Date(session.session_end_time).toLocaleTimeString('en-GB', { hour12: false }) : 'Ongoing';
-          const timeRange = `From: ${startTime}    To: ${endTime}`;
-          const operatingHoursWithTime = `${this.formatDuration(session.operating_hours || 0)}\n${timeRange}`;
-          
-          const sessionRow = worksheet.addRow([
-            '',
-            `  └ Session ${sortedSessions.indexOf(session) + 1}`,
-            new Date(session.session_start_time).toLocaleDateString(),
-            operatingHoursWithTime,
-            `${(session.opening_percentage || 0).toFixed(0)}%`,
-            `${(session.opening_fuel || 0).toFixed(1)}L`,
-            `${(session.opening_fuel_probe_1 || 0).toFixed(1)}L`,
-            `${(session.opening_fuel_probe_2 || 0).toFixed(1)}L`,
-            `${(session.closing_percentage || 0).toFixed(0)}%`,
-            `${(session.closing_fuel || 0).toFixed(1)}L`,
-            `${(session.closing_fuel_probe_1 || 0).toFixed(1)}L`,
-            `${(session.closing_fuel_probe_2 || 0).toFixed(1)}L`,
-            `${(session.total_usage || 0).toFixed(2)}L`,
-            `${(session.total_fill || 0).toFixed(2)}L`,
-            '',
-            '',
-            `${(session.liter_usage_per_hour || (session.operating_hours > 0 ? session.total_usage / session.operating_hours : 0)).toFixed(2)}L/h`,
-            `@R${(session.cost_per_liter || 0).toFixed(2)} = R${(session.cost_for_usage || 0).toFixed(2)}`
-          ]);
-          
-          // Style session row with a clean light blue tint
-          sessionRow.eachCell((cell, colNumber) => {
-            if (colNumber === 1) {
-              cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF7F9FB' } };
-            } else if (colNumber === 4) {
-              cell.font = { italic: true, bold: true, size: 9, color: { argb: 'FF1F2933' } };
-              cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE9F1F8' } };
-              cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
-            } else {
-              cell.font = { size: 9, color: { argb: 'FF1F2933' } };
-              cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF7FAFD' } };
-              cell.alignment = { horizontal: colNumber === 2 ? 'left' : 'center', vertical: 'middle' };
-            }
-            cell.border = {
-              left: { style: 'thin', color: { argb: 'FFE1E7EE' } },
-              right: { style: 'thin', color: { argb: 'FFE1E7EE' } },
-              bottom: { style: 'thin', color: { argb: 'FFE1E7EE' } }
-            };
-          });
-          sessionRow.height = 24;
-        }
+
+      if (!hasActivity) {
+        continue;
       }
-      
-      // Add combined fuel fill rows, grouped in rolling 2-hour windows
-      if (site.fills.length > 0) {
-        const sortedFills = [...site.fills].sort((a, b) => 
-          new Date(a.session_start_time) - new Date(b.session_start_time)
+
+      const eventsByDay = new Map();
+      for (const event of mixedEvents) {
+        const dayKey = getDateKey(event);
+        if (!eventsByDay.has(dayKey)) eventsByDay.set(dayKey, []);
+        eventsByDay.get(dayKey).push(event);
+      }
+
+      const sortedDayKeys = [...eventsByDay.keys()].sort((a, b) => a.localeCompare(b));
+
+      for (const dayKey of sortedDayKeys) {
+        const dayEvents = eventsByDay.get(dayKey).sort(
+          (a, b) => new Date(a.session_start_time || 0) - new Date(b.session_start_time || 0)
         );
-        const twoHoursMs = 2 * 60 * 60 * 1000;
-        let previousFillStartMs = null;
-        const groupedFillWindows = [];
-        let currentWindow = [];
 
-        for (const fill of sortedFills) {
-          const fillStartMs = new Date(fill.session_start_time).getTime();
+        const dayHeaderRow = worksheet.addRow([
+          '',
+          `Date: ${dayKey}`,
+          `${dayEvents.length} events`,
+          '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', ''
+        ]);
 
-          if (previousFillStartMs === null || fillStartMs - previousFillStartMs > twoHoursMs) {
-            if (currentWindow.length > 0) {
-              groupedFillWindows.push(currentWindow);
-            }
-            currentWindow = [];
+        dayHeaderRow.eachCell((cell, colNumber) => {
+          cell.font = { bold: true, size: 9, color: { argb: 'FF0F2A43' } };
+          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEAF1F7' } };
+          cell.alignment = { horizontal: colNumber === 2 ? 'left' : 'center', vertical: 'middle' };
+          cell.border = {
+            top: { style: 'thin', color: { argb: 'FFD7DFE8' } },
+            left: { style: 'thin', color: { argb: 'FFD7DFE8' } },
+            bottom: { style: 'thin', color: { argb: 'FFD7DFE8' } },
+            right: { style: 'thin', color: { argb: 'FFD7DFE8' } }
+          };
+        });
+
+        let dayUsageLiters = 0;
+        let dayFillLiters = 0;
+        let dayTotalLiters = 0;
+        let dayClosingLiters = 0;
+
+        dayEvents.forEach((event, index) => {
+          const isFill = event.event_type === 'fill';
+          const startIso = event.session_start_time;
+          const endIso = event.session_end_time;
+          const startTime = formatTime(startIso);
+          const endTime = endIso ? formatTime(endIso) : 'Ongoing';
+          const timeRange = `From: ${startTime}    To: ${endTime}`;
+
+          let operatingHours = parseNumber(event.operating_hours);
+          if (!operatingHours && startIso && endIso) {
+            const deltaMs = new Date(endIso).getTime() - new Date(startIso).getTime();
+            if (deltaMs > 0) operatingHours = deltaMs / (1000 * 60 * 60);
           }
 
-          currentWindow.push(fill);
-          previousFillStartMs = fillStartMs;
-        }
+          const openingFuel = parseNumber(event.opening_fuel);
+          const closingFuel = parseNumber(event.closing_fuel);
+          const openingFuelProbe1 = parseNumber(event.opening_fuel_probe_1);
+          const openingFuelProbe2 = parseNumber(event.opening_fuel_probe_2);
+          const closingFuelProbe1 = parseNumber(event.closing_fuel_probe_1);
+          const closingFuelProbe2 = parseNumber(event.closing_fuel_probe_2);
+          const usageLiters = isFill ? 0 : parseNumber(event.total_usage);
+          const fillLiters = isFill
+            ? Math.max(0, parseNumber(event.total_fill) || (closingFuel - openingFuel))
+            : parseNumber(event.total_fill);
+          const litersPerHour = operatingHours > 0 ? usageLiters / operatingHours : 0;
+          const costPerLiter = parseNumber(event.cost_per_liter);
+          const costForUsage = parseNumber(event.cost_for_usage);
+          const eventTotalLiters = isFill ? fillLiters : usageLiters;
 
-        if (currentWindow.length > 0) {
-          groupedFillWindows.push(currentWindow);
-        }
+          dayUsageLiters += usageLiters;
+          dayFillLiters += fillLiters;
+          dayTotalLiters += eventTotalLiters;
+          dayClosingLiters = closingFuel;
 
-        groupedFillWindows.forEach((fillWindow, index) => {
-          const firstFill = fillWindow[0];
-          const lastFill = fillWindow[fillWindow.length - 1];
-          const startTime = new Date(firstFill.session_start_time).toLocaleTimeString('en-GB', { hour12: false });
-          const endTime = lastFill.session_end_time ? new Date(lastFill.session_end_time).toLocaleTimeString('en-GB', { hour12: false }) : 'Ongoing';
-          const timeRange = `From: ${startTime}    To: ${endTime}`;
-          const startMs = new Date(firstFill.session_start_time).getTime();
-          const endMs = lastFill.session_end_time ? new Date(lastFill.session_end_time).getTime() : startMs;
-          const operatingHours = endMs > startMs ? (endMs - startMs) / (1000 * 60 * 60) : 0;
-          const fillDurationWithTime = `${this.formatDuration(operatingHours)}\n${timeRange}`;
-          const openingFuel = parseFloat(firstFill.opening_fuel || 0);
-          const closingFuel = parseFloat(lastFill.closing_fuel || 0);
-          const openingFuelProbe1 = parseFloat(firstFill.opening_fuel_probe_1 || 0);
-          const openingFuelProbe2 = parseFloat(firstFill.opening_fuel_probe_2 || 0);
-          const closingFuelProbe1 = parseFloat(lastFill.closing_fuel_probe_1 || 0);
-          const closingFuelProbe2 = parseFloat(lastFill.closing_fuel_probe_2 || 0);
-          const totalFill = Math.max(0, closingFuel - openingFuel);
-          const fillLabel = `  + Fill ${index + 1}`;
+          overall.usageLiters += usageLiters;
+          overall.fillLiters += fillLiters;
+          overall.totalLiters += eventTotalLiters;
+          overall.totalCost += costForUsage;
+          if (isFill) overall.fills += 1;
+          else overall.sessions += 1;
 
-          const fillRow = worksheet.addRow([
+          const rowLabel = isFill ? `  + Fill ${index + 1}` : `  - Session ${index + 1}`;
+
+          const eventRow = worksheet.addRow([
             '',
-            fillLabel,
-            new Date(firstFill.session_start_time).toLocaleDateString(),
-            fillDurationWithTime,
-            `${(parseFloat(firstFill.opening_percentage || 0)).toFixed(0)}%`,
+            rowLabel,
+            `${formatDate(startIso)} ${startTime}`,
+            `${this.formatDuration(operatingHours)}\n${timeRange}`,
+            `${parseNumber(event.opening_percentage).toFixed(0)}%`,
             `${openingFuel.toFixed(1)}L`,
             `${openingFuelProbe1.toFixed(1)}L`,
             `${openingFuelProbe2.toFixed(1)}L`,
-            `${(parseFloat(lastFill.closing_percentage || 0)).toFixed(0)}%`,
+            `${parseNumber(event.closing_percentage).toFixed(0)}%`,
             `${closingFuel.toFixed(1)}L`,
             `${closingFuelProbe1.toFixed(1)}L`,
             `${closingFuelProbe2.toFixed(1)}L`,
-            '0.00L',
-            `${totalFill.toFixed(2)}L`,
-            `${(Math.max(0, closingFuelProbe1 - openingFuelProbe1)).toFixed(2)}L`,
-            `${(Math.max(0, closingFuelProbe2 - openingFuelProbe2)).toFixed(2)}L`,
-            'N/A',
-            'R0.00'
+            `${usageLiters.toFixed(2)}L`,
+            `${fillLiters.toFixed(2)}L`,
+            isFill ? `${Math.max(0, closingFuelProbe1 - openingFuelProbe1).toFixed(2)}L` : '',
+            isFill ? `${Math.max(0, closingFuelProbe2 - openingFuelProbe2).toFixed(2)}L` : '',
+            isFill ? 'N/A' : `${litersPerHour.toFixed(2)}L/h`,
+            isFill ? 'R0.00' : `@R${costPerLiter.toFixed(2)} = R${costForUsage.toFixed(2)}`,
+            `${eventTotalLiters.toFixed(2)}L`,
+            `${closingFuel.toFixed(2)}L`
           ]);
-          
-          // Style fill row with a clean light green tint
-          fillRow.eachCell((cell, colNumber) => {
+
+          eventRow.eachCell((cell, colNumber) => {
             if (colNumber === 1) {
-              cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF8FBF7' } };
+              cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: isFill ? 'FFF8FBF7' : 'FFF7F9FB' } };
             } else if (colNumber === 4) {
               cell.font = { italic: true, bold: true, size: 9, color: { argb: 'FF1F2933' } };
-              cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE8F4EA' } };
+              cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: isFill ? 'FFE8F4EA' : 'FFE9F1F8' } };
               cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
             } else {
               cell.font = { size: 9, color: { argb: 'FF1F2933' } };
-              cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF7FBF7' } };
+              cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: isFill ? 'FFF7FBF7' : 'FFF7FAFD' } };
               cell.alignment = { horizontal: colNumber === 2 ? 'left' : 'center', vertical: 'middle' };
             }
             cell.border = {
-              left: { style: 'thin', color: { argb: 'FFDFEADF' } },
-              right: { style: 'thin', color: { argb: 'FFDFEADF' } },
-              bottom: { style: 'thin', color: { argb: 'FFDFEADF' } }
+              left: { style: 'thin', color: { argb: isFill ? 'FFDFEADF' : 'FFE1E7EE' } },
+              right: { style: 'thin', color: { argb: isFill ? 'FFDFEADF' : 'FFE1E7EE' } },
+              bottom: { style: 'thin', color: { argb: isFill ? 'FFDFEADF' : 'FFE1E7EE' } }
             };
           });
-          fillRow.height = 24;
+          eventRow.height = 24;
+        });
+
+        const dayTotalRow = worksheet.addRow([
+          '',
+          `Daily Total (${dayKey})`,
+          `${dayEvents.length} events`,
+          '', '', '', '', '', '', '', '', '',
+          `${dayUsageLiters.toFixed(2)}L`,
+          `${dayFillLiters.toFixed(2)}L`,
+          '',
+          '',
+          '',
+          '',
+          `${dayTotalLiters.toFixed(2)}L`,
+          `${dayClosingLiters.toFixed(2)}L`
+        ]);
+
+        dayTotalRow.eachCell((cell, colNumber) => {
+          cell.font = { bold: true, size: 9, color: { argb: 'FF1F2933' } };
+          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEFF5EC' } };
+          cell.alignment = { horizontal: colNumber === 2 ? 'left' : 'center', vertical: 'middle' };
+          cell.border = {
+            top: { style: 'thin', color: { argb: 'FFD4E2CF' } },
+            left: { style: 'thin', color: { argb: 'FFD4E2CF' } },
+            bottom: { style: 'thin', color: { argb: 'FFD4E2CF' } },
+            right: { style: 'thin', color: { argb: 'FFD4E2CF' } }
+          };
         });
       }
     }
-    
-    // Apply grouping after all rows are added
-    const groupRanges = [];
-    let currentRow = headerRow.number + 1;
-    
-    for (const site of sessionsData.sites) {
-      const hasSessions = site.sessions.length > 0;
-      currentRow++; // Skip summary row
-      
-      if (hasSessions) {
-        const startRow = currentRow;
-        const endRow = currentRow + site.sessions.length - 1;
-        groupRanges.push({ start: startRow, end: endRow });
-        currentRow = endRow + 1;
-      }
-    }
-    
-    // Apply outline levels
-    groupRanges.forEach(range => {
-      for (let i = range.start; i <= range.end; i++) {
-        worksheet.getRow(i).outlineLevel = 1;
-      }
-    });
-    
-    // Enable outline view
-    worksheet.views = [{ state: 'frozen', ySplit: 10, showGridLines: false, showOutlineSymbols: true }];
-    
-    
-    // Add totals summary
+
     worksheet.addRow([]);
+
     const totalRow = worksheet.addRow([
       '',
       `${reportType.toUpperCase()} TOTALS`,
-      `${sessionsData.totalSessions} sessions`,
+      `${overall.sessions + overall.fills} events`,
       this.formatDuration(sessionsData.totalOperatingHours),
       '', '', '', '', '', '', '', '',
-      sessionsData.sites.reduce((sum, site) => sum + site.total_fuel_usage, 0).toFixed(2),
-      sessionsData.sites.reduce((sum, site) => sum + site.total_fuel_filled, 0).toFixed(2),
-      '', '',
-      (() => {
-        const totalCost = sessionsData.sites.reduce((sum, site) => sum + site.total_cost, 0);
-        const totalUsage = sessionsData.sites.reduce((sum, site) => sum + site.total_fuel_usage, 0);
-        return totalCost > 0 ? `@R${(totalCost / totalUsage).toFixed(2)} = R${totalCost.toFixed(2)}` : 'R0.00';
-      })()
+      `${overall.usageLiters.toFixed(2)}L`,
+      `${overall.fillLiters.toFixed(2)}L`,
+      '',
+      '',
+      '',
+      `R${overall.totalCost.toFixed(2)}`,
+      `${overall.totalLiters.toFixed(2)}L`,
+      ''
     ]);
-    
-    // Add breakdown summary
+
+    totalRow.eachCell((cell, colNumber) => {
+      cell.font = { bold: true, size: 10, color: { argb: 'FF1F2933' } };
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE6EDF5' } };
+      cell.alignment = { horizontal: colNumber === 2 ? 'left' : 'center', vertical: 'middle' };
+      cell.border = {
+        top: { style: 'thin', color: { argb: 'FFD0D9E3' } },
+        left: { style: 'thin', color: { argb: 'FFD0D9E3' } },
+        bottom: { style: 'thin', color: { argb: 'FFD0D9E3' } },
+        right: { style: 'thin', color: { argb: 'FFD0D9E3' } }
+      };
+    });
+    totalRow.height = 22;
+
     worksheet.addRow([]);
+
     const breakdownRow = worksheet.addRow([
       '',
       'BREAKDOWN:',
-      `${sessionsData.totalSessions} operating sessions, ${sessionsData.totalFills || 0} fuel fills`,
-      '', '', '', '', '', '', '', '', '', '', '', '', ''
+      `${overall.sessions} sessions, ${overall.fills} fills (mixed timeline, grouped by day)`,
+      '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', ''
     ]);
-    
-    // Style breakdown row
+
     breakdownRow.eachCell((cell, colNumber) => {
       if (colNumber <= 3) {
         cell.font = { italic: true, size: 10, color: { argb: 'FF666666' } };
@@ -790,22 +788,8 @@ class EnergyRiteExcelReportGenerator {
         };
       }
     });
-    
-    // Style totals row with a compact clean footer
-    totalRow.eachCell((cell, colNumber) => {
-      cell.font = { bold: true, size: 10, color: { argb: 'FF1F2933' } };
-      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE6EDF5' } };
-      cell.alignment = { horizontal: colNumber === 2 ? 'left' : 'center', vertical: 'middle' };
-      cell.border = {
-        top: { style: 'thin', color: { argb: 'FFD0D9E3' } },
-        left: { style: 'thin', color: { argb: 'FFD0D9E3' } },
-        bottom: { style: 'thin', color: { argb: 'FFD0D9E3' } },
-        right: { style: 'thin', color: { argb: 'FFD0D9E3' } }
-      };
-    });
-    totalRow.height = 22;
   }
-  
+
   /**
    * Format duration from decimal hours to readable format
    */

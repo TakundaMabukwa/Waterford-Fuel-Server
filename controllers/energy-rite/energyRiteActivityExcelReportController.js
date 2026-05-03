@@ -21,40 +21,14 @@ function setupWorksheetLayout(worksheet) {
 }
 
 function addReportHeader(worksheet, activityData, costCode, siteId) {
-  const workbook = worksheet.workbook;
-  
-  // Logo space (rows 1-6)
-  worksheet.mergeCells('A1:K6');
-  const logoCell = worksheet.getCell('A1');
-  logoCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1A1A1A' } };
-  
-  // Try to add logo image
-  const fs = require('fs');
-  const path = require('path');
-  const logoPath = path.join(__dirname, '../../waterford.jpeg');
-  
-  try {
-    if (fs.existsSync(logoPath)) {
-      const logoBuffer = fs.readFileSync(logoPath);
-      const imageId = workbook.addImage({
-        buffer: logoBuffer,
-        extension: 'jpeg'
-      });
-      worksheet.addImage(imageId, {
-        tl: { col: 0.1, row: 0.1 },
-        br: { col: 5.9, row: 5.9 }
-      });
-    }
-  } catch (error) {
-    console.log('Logo not found, using text header');
-  }
-  
-  logoCell.value = '';
-  logoCell.alignment = { horizontal: 'left', vertical: 'middle' };
+  worksheet.mergeCells('A1:K1');
+  const spacerCell = worksheet.getCell('A1');
+  spacerCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1A1A1A' } };
+  spacerCell.value = '';
   
   // Title with professional styling
-  worksheet.mergeCells('A7:K7');
-  const titleCell = worksheet.getCell('A7');
+  worksheet.mergeCells('A2:K2');
+  const titleCell = worksheet.getCell('A2');
   titleCell.value = 'ACTIVITY FUEL USAGE REPORT';
   titleCell.font = { size: 20, bold: true, color: { argb: 'FFFFFFFF' } };
   titleCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF333333' } };
@@ -65,8 +39,8 @@ function addReportHeader(worksheet, activityData, costCode, siteId) {
   };
   
   // Period with accent styling
-  worksheet.mergeCells('A8:K8');
-  const periodCell = worksheet.getCell('A8');
+  worksheet.mergeCells('A3:K3');
+  const periodCell = worksheet.getCell('A3');
   periodCell.value = `Date: ${activityData.date}`;
   periodCell.font = { size: 12, bold: true, color: { argb: 'FF333333' } };
   periodCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF5F5F5' } };
@@ -76,16 +50,16 @@ function addReportHeader(worksheet, activityData, costCode, siteId) {
   };
   
   // Cost Code / Site
-  worksheet.mergeCells('A9:K9');
-  const filterCell = worksheet.getCell('A9');
+  worksheet.mergeCells('A4:K4');
+  const filterCell = worksheet.getCell('A4');
   filterCell.value = siteId ? `Site: ${siteId}` : `Cost Center: ${costCode || 'ALL COST CENTERS'}`;
   filterCell.font = { size: 12, bold: true, color: { argb: 'FF333333' } };
   filterCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF5F5F5' } };
   filterCell.alignment = { horizontal: 'center', vertical: 'middle' };
   
   // Summary
-  worksheet.mergeCells('A10:K10');
-  const summaryCell = worksheet.getCell('A10');
+  worksheet.mergeCells('A5:K5');
+  const summaryCell = worksheet.getCell('A5');
   const peakPeriod = activityData.fuel_analysis.peak_usage_period;
   summaryCell.value = `Peak Period: ${peakPeriod.name} (${peakPeriod.usage.toFixed(1)}L, R${peakPeriod.cost.toFixed(2)})`;
   summaryCell.font = { size: 11, italic: true, color: { argb: 'FF666666' } };
