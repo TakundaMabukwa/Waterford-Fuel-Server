@@ -56,3 +56,5 @@ test-credentials.js
 *.md
 !README.md
 *.sql
+!sql/
+!sql/create-postgres-realtime-messages.sql
