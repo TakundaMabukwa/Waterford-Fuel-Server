@@ -163,6 +163,55 @@ async function calculatePeriodFuelUsage(targetDate, accessibleCostCodes = [], sp
   }
 }
 
+function toNumber(value) {
+  const parsed = parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function getSessionFuelMetrics(session = {}) {
+  const openingFuel = toNumber(session.opening_fuel);
+  const closingFuel = toNumber(session.closing_fuel);
+
+  const openingProbe1 = toNumber(session.opening_fuel_probe_1);
+  const closingProbe1 = toNumber(session.closing_fuel_probe_1);
+  const openingProbe2 = toNumber(session.opening_fuel_probe_2);
+  const closingProbe2 = toNumber(session.closing_fuel_probe_2);
+
+  const rawUsage = toNumber(session.total_usage);
+  const rawFill = toNumber(session.total_fill);
+
+  const usageFromTotalFuel = Math.max(0, openingFuel - closingFuel);
+  const fillFromTotalFuel = Math.max(0, closingFuel - openingFuel);
+
+  const fuelUsageProbe1 = Math.max(0, openingProbe1 - closingProbe1);
+  const fuelUsageProbe2 = Math.max(0, openingProbe2 - closingProbe2);
+  const fuelFillProbe1 = Math.max(0, closingProbe1 - openingProbe1);
+  const fuelFillProbe2 = Math.max(0, closingProbe2 - openingProbe2);
+
+  const usageFromProbes = fuelUsageProbe1 + fuelUsageProbe2;
+  const fillFromProbes = fuelFillProbe1 + fuelFillProbe2;
+
+  const fuelUsage = rawUsage > 0 ? rawUsage : (usageFromProbes > 0 ? usageFromProbes : usageFromTotalFuel);
+  const fuelFilled = rawFill > 0 ? rawFill : (fillFromProbes > 0 ? fillFromProbes : fillFromTotalFuel);
+  const totalLiters = fuelUsage + fuelFilled;
+
+  return {
+    openingFuel,
+    closingFuel,
+    openingProbe1,
+    closingProbe1,
+    openingProbe2,
+    closingProbe2,
+    fuelUsage,
+    fuelUsageProbe1,
+    fuelUsageProbe2,
+    fuelFilled,
+    fuelFillProbe1,
+    fuelFillProbe2,
+    totalLiters
+  };
+}
+
 // Calculate fuel usage across 3 shifts: Night (00:00-08:00), Day (08:00-16:00), Evening (16:00-00:00)
 async function calculateShiftFuelUsage(targetDate, fuelData, cost_code, site_id) {
   try {
@@ -564,6 +613,10 @@ class EnergyRiteReportsController {
           operating_hours,
           opening_fuel,
           closing_fuel,
+          opening_fuel_probe_1,
+          closing_fuel_probe_1,
+          opening_fuel_probe_2,
+          closing_fuel_probe_2,
           total_usage,
           total_fill,
           cost_for_usage,
@@ -662,21 +715,28 @@ class EnergyRiteReportsController {
         // Combine consecutive fills for each vehicle (within 2 hours)
         Object.keys(sessionsByVehicle).forEach(vehicle => {
           const combinedFills = combineFuelFills(sessionsByVehicle[vehicle], 2);
-          
-          fillsByVehicle[vehicle] = {
-            fill_count: combinedFills.length,
-            total_filled: combinedFills.reduce((sum, f) => sum + parseFloat(f.total_fill || 0), 0),
-            fills: combinedFills.map(fill => ({
+          const combinedFillEntries = combinedFills.map(fill => {
+            const explicitFill = toNumber(fill.total_fill);
+            const fallbackFill = Math.max(0, toNumber(fill.closing_fuel) - toNumber(fill.opening_fuel));
+            const fillAmount = explicitFill > 0 ? explicitFill : fallbackFill;
+
+            return {
               time: fill.session_start_time,
               end_time: fill.session_end_time,
               duration: fill.duration_formatted,
               opening_fuel: fill.opening_fuel,
               closing_fuel: fill.closing_fuel,
-              amount: fill.total_fill,
+              amount: fillAmount,
               is_combined: fill.is_combined,
               combined_count: fill.fill_count,
               method: 'SESSION_BASED'
-            }))
+            };
+          });
+          
+          fillsByVehicle[vehicle] = {
+            fill_count: combinedFillEntries.length,
+            total_filled: combinedFillEntries.reduce((sum, f) => sum + toNumber(f.amount), 0),
+            fills: combinedFillEntries
           };
         });
       }
@@ -689,6 +749,7 @@ class EnergyRiteReportsController {
       
       // Add operating sessions
       operatingSessions.forEach(session => {
+        const metrics = getSessionFuelMetrics(session);
         activitySummary.push({
           id: session.id || `${session.branch}_${session.session_start_time}`,
           branch: session.branch,
@@ -697,10 +758,22 @@ class EnergyRiteReportsController {
           start_time: session.session_start_time,
           end_time: session.session_end_time,
           duration_hours: parseFloat(session.operating_hours || 0),
-          opening_fuel: parseFloat(session.opening_fuel || 0),
-          closing_fuel: parseFloat(session.closing_fuel || 0),
-          fuel_usage: parseFloat(session.total_usage || 0),
-          fuel_filled: parseFloat(session.total_fill || 0),
+          opening_fuel: metrics.openingFuel,
+          closing_fuel: metrics.closingFuel,
+          opening_fuel_probe_1: metrics.openingProbe1,
+          closing_fuel_probe_1: metrics.closingProbe1,
+          opening_fuel_probe_2: metrics.openingProbe2,
+          closing_fuel_probe_2: metrics.closingProbe2,
+          fuel_usage_probe_1: metrics.fuelUsageProbe1,
+          fuel_usage_probe_2: metrics.fuelUsageProbe2,
+          total_fuel_usage_probe_1: metrics.fuelUsageProbe1,
+          total_fuel_usage_probe_2: metrics.fuelUsageProbe2,
+          fuel_usage: metrics.fuelUsage,
+          total_usage: metrics.fuelUsage,
+          fuel_filled: metrics.fuelFilled,
+          total_fill: metrics.fuelFilled,
+          total: metrics.totalLiters,
+          total_liters: metrics.totalLiters,
           cost: parseFloat(session.cost_for_usage || 0),
           efficiency: parseFloat(session.liter_usage_per_hour || 0),
           status: session.session_status,
@@ -709,8 +782,8 @@ class EnergyRiteReportsController {
           has_multiple_sessions: false,
           expandable: false,
           total_operating_hours: parseFloat(session.operating_hours || 0),
-          total_fuel_usage: parseFloat(session.total_usage || 0),
-          total_fuel_filled: parseFloat(session.total_fill || 0),
+          total_fuel_usage: metrics.fuelUsage,
+          total_fuel_filled: metrics.fuelFilled,
           total_cost: parseFloat(session.cost_for_usage || 0)
         });
       });
@@ -718,6 +791,7 @@ class EnergyRiteReportsController {
       // Add combined fuel fills
       Object.entries(fillsByVehicle).forEach(([vehicle, vehicleData]) => {
         vehicleData.fills.forEach(fill => {
+          const filledAmount = toNumber(fill.amount);
           activitySummary.push({
             id: `fill_${vehicle}_${fill.time}`,
             branch: vehicle,
@@ -728,12 +802,24 @@ class EnergyRiteReportsController {
             duration_hours: parseFloat(fill.duration?.match(/(\d+) hours/)?.[1] || 0) + parseFloat(fill.duration?.match(/(\d+) minutes/)?.[1] || 0) / 60,
             opening_fuel: parseFloat(fill.opening_fuel || 0),
             closing_fuel: parseFloat(fill.closing_fuel || 0),
+            opening_fuel_probe_1: 0,
+            closing_fuel_probe_1: 0,
+            opening_fuel_probe_2: 0,
+            closing_fuel_probe_2: 0,
+            fuel_usage_probe_1: 0,
+            fuel_usage_probe_2: 0,
+            total_fuel_usage_probe_1: 0,
+            total_fuel_usage_probe_2: 0,
             fuel_usage: 0,
-            fuel_filled: parseFloat(fill.amount || 0),
+            total_usage: 0,
+            fuel_filled: filledAmount,
+            total_fill: filledAmount,
+            total: filledAmount,
+            total_liters: filledAmount,
             cost: 0,
             efficiency: 0,
             status: 'FUEL_FILL_COMPLETED',
-            notes: fill.is_combined ? `Combined ${fill.combined_count} fills. Total: ${fill.amount.toFixed(2)}L` : 'Fuel fill completed',
+            notes: fill.is_combined ? `Combined ${fill.combined_count} fills. Total: ${filledAmount.toFixed(2)}L` : 'Fuel fill completed',
             session_count: fill.is_combined ? fill.combined_count : 1,
             has_multiple_sessions: fill.is_combined,
             expandable: fill.is_combined,
@@ -741,7 +827,7 @@ class EnergyRiteReportsController {
             combined_count: fill.combined_count,
             total_operating_hours: 0,
             total_fuel_usage: 0,
-            total_fuel_filled: parseFloat(fill.amount || 0),
+            total_fuel_filled: filledAmount,
             total_cost: 0
           });
         });
@@ -760,7 +846,9 @@ class EnergyRiteReportsController {
         completed_sessions: operatingSessions.filter(s => s.session_status === 'COMPLETED').length,
         ongoing_sessions: operatingSessions.filter(s => s.session_status === 'ONGOING').length,
         total_operating_hours: operatingSessions.reduce((sum, s) => sum + parseFloat(s.operating_hours || 0), 0),
-        total_fuel_usage: operatingSessions.reduce((sum, s) => sum + parseFloat(s.total_usage || 0), 0),
+        total_fuel_usage: operatingSessions.reduce((sum, s) => sum + getSessionFuelMetrics(s).fuelUsage, 0),
+        total_fuel_usage_probe_1: operatingSessions.reduce((sum, s) => sum + getSessionFuelMetrics(s).fuelUsageProbe1, 0),
+        total_fuel_usage_probe_2: operatingSessions.reduce((sum, s) => sum + getSessionFuelMetrics(s).fuelUsageProbe2, 0),
         total_fuel_filled: Object.values(fillsByVehicle).reduce((sum, v) => sum + v.total_filled, 0),
         total_cost: operatingSessions.reduce((sum, s) => sum + parseFloat(s.cost_for_usage || 0), 0)
       };
@@ -1046,6 +1134,18 @@ class EnergyRiteReportsController {
             start_date: rangeStartDate,
             end_date: rangeEndDate
           },
+          table_columns: [
+            { key: 'branch', label: 'Vehicle' },
+            { key: 'start_time', label: 'Start Date/Time' },
+            { key: 'end_time', label: 'End Date/Time' },
+            { key: 'duration_hours', label: 'Operating Hours' },
+            { key: 'fuel_usage', label: 'Total Usage' },
+            { key: 'fuel_usage_probe_1', label: 'Tank 1 Usage' },
+            { key: 'fuel_usage_probe_2', label: 'Tank 2 Usage' },
+            { key: 'fuel_filled', label: 'Fuel Fills' },
+            { key: 'total_liters', label: 'Total' },
+            { key: 'peak_usage_session', label: 'Peak Usage Time' }
+          ],
           cost_code: cost_code || 'All',
           site_id: site_id,
           summary: summary,
@@ -1968,6 +2068,10 @@ class EnergyRiteReportsController {
           operating_hours,
           opening_fuel,
           closing_fuel,
+          opening_fuel_probe_1,
+          closing_fuel_probe_1,
+          opening_fuel_probe_2,
+          closing_fuel_probe_2,
           total_usage,
           total_fill,
           cost_for_usage,
@@ -1992,6 +2096,10 @@ class EnergyRiteReportsController {
           operating_hours,
           opening_fuel,
           closing_fuel,
+          opening_fuel_probe_1,
+          closing_fuel_probe_1,
+          opening_fuel_probe_2,
+          closing_fuel_probe_2,
           total_usage,
           total_fill,
           cost_for_usage,
@@ -2051,6 +2159,9 @@ class EnergyRiteReportsController {
       Object.keys(sessionsByVehicle).forEach(vehicle => {
         const combinedFills = combineFuelFills(sessionsByVehicle[vehicle], 2);
         combinedFills.forEach(fill => {
+          const explicitFill = toNumber(fill.total_fill);
+          const fallbackFill = Math.max(0, toNumber(fill.closing_fuel) - toNumber(fill.opening_fuel));
+          const fillAmount = explicitFill > 0 ? explicitFill : fallbackFill;
           fillEvents.push({
             id: `fill_${vehicle}_${fill.session_start_time}`,
             event_type: 'FILL',
@@ -2058,9 +2169,13 @@ class EnergyRiteReportsController {
             start_time: fill.session_start_time,
             end_time: fill.session_end_time,
             duration_hours: parseFloat(fill.duration_hours || 0),
+            fuel_usage_probe_1: 0,
+            fuel_usage_probe_2: 0,
             fuel_usage: 0,
-            fuel_filled: parseFloat(fill.total_fill || 0),
-            total_liters: parseFloat(fill.total_fill || 0),
+            total_usage: 0,
+            fuel_filled: fillAmount,
+            total_fill: fillAmount,
+            total_liters: fillAmount,
             status: 'FUEL_FILL_COMPLETED',
             notes: fill.is_combined
               ? `Combined ${fill.fill_count} fills`
@@ -2070,8 +2185,7 @@ class EnergyRiteReportsController {
       });
 
       const sessionEvents = operatingSessions.map(session => {
-        const usage = parseFloat(session.total_usage || 0);
-        const filled = parseFloat(session.total_fill || 0);
+        const metrics = getSessionFuelMetrics(session);
         return {
           id: session.id || `${session.branch}_${session.session_start_time}`,
           event_type: 'SESSION',
@@ -2079,9 +2193,13 @@ class EnergyRiteReportsController {
           start_time: session.session_start_time,
           end_time: session.session_end_time,
           duration_hours: parseFloat(session.operating_hours || 0),
-          fuel_usage: usage,
-          fuel_filled: filled,
-          total_liters: usage + filled,
+          fuel_usage_probe_1: metrics.fuelUsageProbe1,
+          fuel_usage_probe_2: metrics.fuelUsageProbe2,
+          fuel_usage: metrics.fuelUsage,
+          total_usage: metrics.fuelUsage,
+          fuel_filled: metrics.fuelFilled,
+          total_fill: metrics.fuelFilled,
+          total_liters: metrics.totalLiters,
           status: session.session_status,
           notes: session.notes || ''
         };
