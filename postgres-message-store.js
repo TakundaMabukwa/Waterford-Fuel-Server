@@ -43,12 +43,30 @@ function normalizeMessage(row) {
     plate: row.plate,
     locTime: row.loc_time,
     timestamp,
+    driver_name: row.driver_name || null,
     fuel_probe_1_volume_in_tank: toNumber(row.fuel_probe_1_volume_in_tank) ?? 0,
     fuel_probe_2_volume_in_tank: toNumber(row.fuel_probe_2_volume_in_tank) ?? 0,
     fuel_probe_1_level_percentage: toNumber(row.fuel_probe_1_level_percentage) ?? 0,
     fuel_probe_2_level_percentage: toNumber(row.fuel_probe_2_level_percentage) ?? 0,
     combined_fuel_volume_in_tank: toNumber(row.combined_fuel_volume_in_tank) ?? 0,
     combined_fuel_percentage: toNumber(row.combined_fuel_percentage) ?? 0,
+    speed: toNumber(row.speed) ?? 0
+  };
+}
+
+function normalizeStatusMessage(row) {
+  if (!row) return null;
+
+  const timestamp = toTimestamp(row.message_time);
+  if (!Number.isFinite(timestamp)) {
+    return null;
+  }
+
+  return {
+    plate: row.plate,
+    locTime: row.loc_time,
+    timestamp,
+    driver_name: row.driver_name || null,
     speed: toNumber(row.speed) ?? 0
   };
 }
@@ -163,6 +181,7 @@ async function getRecentFuelMessages(plate, limit = 10, options = {}) {
       plate,
       loc_time,
       message_time,
+      driver_name,
       speed,
       fuel_probe_1_level_percentage,
       fuel_probe_2_level_percentage,
@@ -188,6 +207,7 @@ async function getFuelMessagesInRange(plate, startTimeIso, endTimeIso, limit = 5
       plate,
       loc_time,
       message_time,
+      driver_name,
       speed,
       fuel_probe_1_level_percentage,
       fuel_probe_2_level_percentage,
@@ -208,10 +228,54 @@ async function getFuelMessagesInRange(plate, startTimeIso, endTimeIso, limit = 5
   return rows.map(normalizeMessage).filter(Boolean);
 }
 
+async function getRecentStatusMessages(plate, limit = 20, options = {}) {
+  await init();
+
+  const values = [plate];
+  let index = values.length;
+  const whereParts = [
+    'plate = $1',
+    "driver_name IS NOT NULL",
+    "TRIM(driver_name) <> ''"
+  ];
+
+  if (options.beforeTimeIso) {
+    index += 1;
+    whereParts.push(`message_time < $${index}`);
+    values.push(options.beforeTimeIso);
+  }
+
+  if (options.afterTimeIso) {
+    index += 1;
+    whereParts.push(`message_time > $${index}`);
+    values.push(options.afterTimeIso);
+  }
+
+  index += 1;
+  values.push(limit);
+
+  const query = `
+    SELECT
+      plate,
+      loc_time,
+      message_time,
+      driver_name,
+      speed
+    FROM ${TABLE_REF}
+    WHERE ${whereParts.join(' AND ')}
+    ORDER BY message_time DESC
+    LIMIT $${index}
+  `;
+
+  const { rows } = await pool.query(query, values);
+  return rows.map(normalizeStatusMessage).filter(Boolean);
+}
+
 module.exports = {
   TABLE_NAME,
   init,
   storeMessage,
   getRecentFuelMessages,
-  getFuelMessagesInRange
+  getFuelMessagesInRange,
+  getRecentStatusMessages
 };

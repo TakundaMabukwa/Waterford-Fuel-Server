@@ -15,6 +15,11 @@ const FUEL_STABILITY_CONFIG = {
   maxStableSpreadLiters: 3
 };
 
+const ENGINE_STATUS_LOOKBACK_MS = (() => {
+  const parsed = parseFloat(process.env.FUEL_ENGINE_STATUS_LOOKBACK_MS || '');
+  return Number.isFinite(parsed) ? parsed : 30 * 60 * 1000;
+})();
+
 class EnergyRiteWebSocketClient {
   constructor(wsUrl) {
     this.wsUrl = wsUrl;
@@ -25,6 +30,7 @@ class EnergyRiteWebSocketClient {
     this.pendingFuelUpdates = new Map();
     this.pendingClosures = new Map();
     this.recentFuelData = new Map();
+    this.lastEngineStatusByPlate = new Map();
     // pendingFuelFills, fuelFillWatchers, preFillWatchers now use SQLite via pendingFuelDb
     
     // Message queue sorter
@@ -73,7 +79,7 @@ class EnergyRiteWebSocketClient {
       const requiredStableTime = watcherType === 'THEFT' ? 10 * 60 * 1000 : 2 * 60 * 1000;
       
       if (timeSinceLastChange >= requiredStableTime) {
-        console.log(`🎯 ${watcherType} STABILIZED: ${watcher.plate} - No change for ${(timeSinceLastChange/1000).toFixed(0)}s`);
+        console.log(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¯ ${watcherType} STABILIZED: ${watcher.plate} - No change for ${(timeSinceLastChange/1000).toFixed(0)}s`);
         this.completeFuelFillWatcher(watcher.plate);
       }
     }
@@ -86,7 +92,7 @@ class EnergyRiteWebSocketClient {
     // Check for any expired watchers that need completion (max timeout reached)
     const expiredWatchers = pendingFuelDb.getExpiredFuelFillWatchers();
     for (const watcher of expiredWatchers) {
-      console.log(`⏰ Completing expired watcher for ${watcher.plate} on startup`);
+      console.log(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â° Completing expired watcher for ${watcher.plate} on startup`);
       this.completeFuelFillWatcher(watcher.plate);
     }
     
@@ -100,7 +106,7 @@ class EnergyRiteWebSocketClient {
       const requiredStableTime = watcherType === 'THEFT' ? 10 * 60 * 1000 : 2 * 60 * 1000;
       
       if (timeSinceLastChange >= requiredStableTime) {
-        console.log(`🎯 Completing stabilized ${watcherType} watcher for ${watcher.plate} on startup`);
+        console.log(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¯ Completing stabilized ${watcherType} watcher for ${watcher.plate} on startup`);
         this.completeFuelFillWatcher(watcher.plate);
       }
     }
@@ -118,40 +124,40 @@ class EnergyRiteWebSocketClient {
 
   connect() {
     if (this.testMode) {
-      console.log('🧪 Test mode - skipping WebSocket connection');
+      console.log('ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â§ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Âª Test mode - skipping WebSocket connection');
       return;
     }
     
     // Initialize SQLite database first
     this.initDb().then(() => {
-      console.log(`🔌 Connecting to WebSocket: ${this.wsUrl}`);
+      console.log(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬Â¦ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ Connecting to WebSocket: ${this.wsUrl}`);
       this.ws = new WebSocket(this.wsUrl);
 
       this.ws.on('open', () => {
-        console.log('✅ WebSocket connected');
+        console.log('ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã¢â‚¬Â¦ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¦ WebSocket connected');
         this.reconnectAttempts = 0;
       });
 
       this.ws.on('message', async (data) => {
         try {
           const message = JSON.parse(data);
-          console.log('📨 RAW MESSAGE:', JSON.stringify(message, null, 2));
+          console.log('ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã¢â‚¬Å“ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¨ RAW MESSAGE:', JSON.stringify(message, null, 2));
           
           if (message.Plate && message.LocTime) {
             this.addToQueue(message);
           }
         } catch (error) {
-          console.error('❌ Error parsing message:', error);
+          console.error('ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬Â¦ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ Error parsing message:', error);
         }
       });
 
       this.ws.on('close', () => {
-        console.log('🔌 WebSocket disconnected');
+        console.log('ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬Â¦ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ WebSocket disconnected');
         this.reconnect();
       });
 
       this.ws.on('error', (error) => {
-        console.error('❌ WebSocket error:', error);
+        console.error('ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬Â¦ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ WebSocket error:', error);
       });
     });
   }
@@ -175,12 +181,12 @@ class EnergyRiteWebSocketClient {
     // Fast sort using pre-calculated timestamps
     if (batch.length > 1) {
       batch.sort((a, b) => a._sortTime - b._sortTime);
-      console.log(`📦 Sorted ${batch.length} messages`);
+      console.log(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã¢â‚¬Å“ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¦ Sorted ${batch.length} messages`);
     }
     
     // Process without awaiting each (parallel where safe)
     for (const message of batch) {
-      console.log(`📋 [${message.Plate}] ${message.LocTime}`);
+      console.log(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã¢â‚¬Å“ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¹ [${message.Plate}] ${message.LocTime}`);
       await this.processVehicleUpdate(message);
     }
     
@@ -194,7 +200,7 @@ class EnergyRiteWebSocketClient {
   async processVehicleUpdate(vehicleData) {
     try {
       const actualBranch = vehicleData.Plate;
-      console.log(`🔍 Processing ${actualBranch}:`, {
+      console.log(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â Processing ${actualBranch}:`, {
         DriverName: vehicleData.DriverName,
         fuel_probe_1_level: vehicleData.fuel_probe_1_level,
         fuel_probe_1_volume_in_tank: vehicleData.fuel_probe_1_volume_in_tank,
@@ -256,7 +262,8 @@ class EnergyRiteWebSocketClient {
       // Handle engine/ignition status FIRST
       const engineStatus = this.parseEngineStatus(vehicleData.DriverName);
       if (engineStatus) {
-        console.log(`🔧 Processing engine ${engineStatus} for ${actualBranch}`);
+        this.updateLastEngineStatus(actualBranch, engineStatus, vehicleData.LocTime, 'stream', vehicleData.DriverName);
+        console.log(`[engine] Processing ${engineStatus} for ${actualBranch}`);
         await this.handleSessionChange(actualBranch, engineStatus, vehicleData);
       }
       
@@ -274,7 +281,7 @@ class EnergyRiteWebSocketClient {
       }
 
     } catch (error) {
-      console.error('❌ Error processing vehicle update:', error);
+      console.error('ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬Â¦ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ Error processing vehicle update:', error);
     }
   }
 
@@ -616,6 +623,27 @@ class EnergyRiteWebSocketClient {
     return extrema.highest;
   }
 
+  async findSessionClosingFuelFromLastMessages(plate, targetLocTime, count = 10) {
+    const extrema = await this.getFuelExtremaFromLastMessages(plate, targetLocTime, count);
+    if (!extrema.lowest && !extrema.highest) {
+      return null;
+    }
+
+    // For operating session closure, use the lowest recent reading before ENGINE OFF
+    // so closing reflects fuel burned by the running engine instead of a transient peak.
+    const selected = extrema.lowest || extrema.highest;
+    const spread = extrema.lowest && extrema.highest
+      ? Math.max(0, extrema.highest.combined_fuel_volume_in_tank - extrema.lowest.combined_fuel_volume_in_tank)
+      : 0;
+
+    console.log(
+      `[capture] Session close using last-${count} LOWEST BEFORE ${plate}: ${selected.combined_fuel_volume_in_tank}L ` +
+      `(${(selected.diffMs / 1000).toFixed(0)}s before, spread ${spread.toFixed(1)}L, source: ${selected.source})`
+    );
+
+    return selected;
+  }
+
   trackPreFillLowest(plate, fuelData, locTime) {
     try {
       const existing = pendingFuelDb.getPreFillWatcher(plate);
@@ -661,7 +689,7 @@ class EnergyRiteWebSocketClient {
       // Clean up old watchers periodically
       pendingFuelDb.cleanupOldPreFillWatchers(30 * 60 * 1000);
     } catch (error) {
-      console.error(`❌ Error tracking pre-fill lowest for ${plate}:`, error.message);
+      console.error(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬Â¦ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ Error tracking pre-fill lowest for ${plate}:`, error.message);
     }
   }
 
@@ -718,7 +746,7 @@ class EnergyRiteWebSocketClient {
             fuelData.fuel_probe_1_level_percentage,
             fuelData.fuel_probe_2_level_percentage
           );
-          console.log(`📈 Fill watcher: ${plate} highest now ${currentFuel}L`);
+          console.log(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã¢â‚¬Å“ÃƒÆ’Ã¢â‚¬Â¹ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â  Fill watcher: ${plate} highest now ${currentFuel}L`);
         } else if (watcher.watcher_type === 'THEFT' && currentFuel < watcher.lowest_fuel) {
           pendingFuelDb.updateFuelFillWatcherLowest(
             plate,
@@ -730,7 +758,7 @@ class EnergyRiteWebSocketClient {
             fuelData.fuel_probe_1_level_percentage,
             fuelData.fuel_probe_2_level_percentage
           );
-          console.log(`📉 Theft watcher: ${plate} lowest now ${currentFuel}L`);
+          console.log(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã¢â‚¬Å“ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â° Theft watcher: ${plate} lowest now ${currentFuel}L`);
         }
         return;
       }
@@ -743,11 +771,22 @@ class EnergyRiteWebSocketClient {
       const recentMessages = await postgresMessageStore.getRecentFuelMessages(plate, 10);
       if (!recentMessages || recentMessages.length === 0) return;
 
-      const comparisonWindow = recentMessages.filter((entry) => {
-        if (entry.timestamp > currentLocTime) return false;
-        if ((parseFloat(entry.speed) || 0) >= 10) return false;
-        return (parseFloat(entry.combined_fuel_volume_in_tank) || 0) > 0;
-      });
+      const comparisonWindow = recentMessages
+        .map((entry) => ({
+          ...entry,
+          speed: this.parseNumericFuelValue(entry.speed),
+          combined_fuel_volume_in_tank: this.parseNumericFuelValue(entry.combined_fuel_volume_in_tank),
+          combined_fuel_percentage: this.parseNumericFuelValue(entry.combined_fuel_percentage),
+          fuel_probe_1_volume_in_tank: this.parseNumericFuelValue(entry.fuel_probe_1_volume_in_tank),
+          fuel_probe_2_volume_in_tank: this.parseNumericFuelValue(entry.fuel_probe_2_volume_in_tank),
+          fuel_probe_1_level_percentage: this.parseNumericFuelValue(entry.fuel_probe_1_level_percentage),
+          fuel_probe_2_level_percentage: this.parseNumericFuelValue(entry.fuel_probe_2_level_percentage)
+        }))
+        .filter((entry) => {
+          if (entry.timestamp > currentLocTime) return false;
+          if (entry.speed >= 10) return false;
+          return entry.combined_fuel_volume_in_tank > 0;
+        });
       if (comparisonWindow.length === 0) return;
 
       let highestEntry = comparisonWindow[0];
@@ -792,7 +831,7 @@ class EnergyRiteWebSocketClient {
         
         console.log(`[theft] THEFT WATCHER: ${plate} - Opening: ${openingFuel}L, Current: ${currentFuel}L`);
       }    } catch (error) {
-      console.error(`❌ Error detecting fuel changes for ${plate}:`, error.message);
+      console.error(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬Â¦ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ Error detecting fuel changes for ${plate}:`, error.message);
     }
   }
 
@@ -818,7 +857,7 @@ class EnergyRiteWebSocketClient {
             fuelData.fuel_probe_1_level_percentage,
             fuelData.fuel_probe_2_level_percentage
           );
-          console.log(`📈 Fill watcher update: ${plate} highest fuel now ${currentFuel}L`);
+          console.log(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã¢â‚¬Å“ÃƒÆ’Ã¢â‚¬Â¹ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â  Fill watcher update: ${plate} highest fuel now ${currentFuel}L`);
         }
         return; // Already tracking this fill
       }
@@ -828,6 +867,8 @@ class EnergyRiteWebSocketClient {
       if (existingPending) {
         return; // Don't interfere with status-based fill detection
       }
+      const engineIsOff = await this.isVehicleEngineOffForFill(plate, locTime);
+      if (!engineIsOff) return;
       
       const currentTime = new Date(this.convertLocTime(locTime)).getTime();
       
@@ -844,17 +885,23 @@ class EnergyRiteWebSocketClient {
       const recentMessages = await postgresMessageStore.getRecentFuelMessages(plate, 10);
       for (const entry of recentMessages) {
         if (entry.timestamp >= currentTime) continue;
-        if ((entry.combined_fuel_volume_in_tank || 0) <= 0) continue;
+        const entryFuel = this.parseNumericFuelValue(entry.combined_fuel_volume_in_tank);
+        if (entryFuel <= 0) continue;
+        const entryPercentage = this.parseNumericFuelValue(entry.combined_fuel_percentage);
+        const entryFuelProbe1 = this.parseNumericFuelValue(entry.fuel_probe_1_volume_in_tank);
+        const entryFuelProbe2 = this.parseNumericFuelValue(entry.fuel_probe_2_volume_in_tank);
+        const entryPctProbe1 = this.parseNumericFuelValue(entry.fuel_probe_1_level_percentage);
+        const entryPctProbe2 = this.parseNumericFuelValue(entry.fuel_probe_2_level_percentage);
 
-        if (lowestRecentFuel === null || entry.combined_fuel_volume_in_tank < lowestRecentFuel) {
-          lowestRecentFuel = entry.combined_fuel_volume_in_tank;
+        if (lowestRecentFuel === null || entryFuel < lowestRecentFuel) {
+          lowestRecentFuel = entryFuel;
           lowestRecentTime = entry.timestamp;
           lowestRecentLocTime = entry.locTime;
-          lowestRecentPercentage = entry.combined_fuel_percentage;
-          lowestRecentFuelProbe1 = entry.fuel_probe_1_volume_in_tank;
-          lowestRecentFuelProbe2 = entry.fuel_probe_2_volume_in_tank;
-          lowestRecentPercentageProbe1 = entry.fuel_probe_1_level_percentage;
-          lowestRecentPercentageProbe2 = entry.fuel_probe_2_level_percentage;
+          lowestRecentPercentage = entryPercentage;
+          lowestRecentFuelProbe1 = entryFuelProbe1;
+          lowestRecentFuelProbe2 = entryFuelProbe2;
+          lowestRecentPercentageProbe1 = entryPctProbe1;
+          lowestRecentPercentageProbe2 = entryPctProbe2;
         }
       }
       
@@ -864,7 +911,7 @@ class EnergyRiteWebSocketClient {
       const fuelIncrease = currentFuel - lowestRecentFuel;
       
       if (fuelIncrease >= 10) {
-        console.log(`🔎 PASSIVE FILL DETECTED for ${plate}: +${fuelIncrease.toFixed(1)}L in ${((currentTime - lowestRecentTime) / 1000).toFixed(0)}s`);
+        console.log(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â½ PASSIVE FILL DETECTED for ${plate}: +${fuelIncrease.toFixed(1)}L in ${((currentTime - lowestRecentTime) / 1000).toFixed(0)}s`);
         
         // Use the lowest reading from the last 10 Postgres messages.
         const openingFuel = lowestRecentFuel;
@@ -899,13 +946,13 @@ class EnergyRiteWebSocketClient {
         // Clean up pre-fill watcher so it cannot override the last-10 baseline
         pendingFuelDb.deletePreFillWatcher(plate);
         
-        console.log(`🔎 PASSIVE FILL WATCHER started for ${plate} - Opening: ${openingFuel}L, Current: ${currentFuel}L`);
+        console.log(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â½ PASSIVE FILL WATCHER started for ${plate} - Opening: ${openingFuel}L, Current: ${currentFuel}L`);
         
         // Note: No fixed timeout - fill will complete when fuel stabilizes (stops increasing for 2 min)
         // The stabilization checker runs every 30 seconds
       }
     } catch (error) {
-      console.error(`❌ Error in passive fill detection for ${plate}:`, error.message);
+      console.error(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬Â¦ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ Error in passive fill detection for ${plate}:`, error.message);
     }
   }
 
@@ -916,14 +963,24 @@ class EnergyRiteWebSocketClient {
       // Check if passive detection already started a watcher for this fill
       const existingWatcher = pendingFuelDb.getFuelFillWatcher(plate);
       if (existingWatcher) {
-        console.log(`ℹ️ FUEL FILL status for ${plate} - Watcher already active (passive detected earlier)`);
+        console.log(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¾ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¹ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¯ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â FUEL FILL status for ${plate} - Watcher already active (passive detected earlier)`);
         return; // Let the existing watcher handle it
       }
       
       // Check if we already have a pending fill (status already received)
       const existingPending = pendingFuelDb.getPendingFuelFill(plate);
       if (existingPending) {
-        console.log(`ℹ️ FUEL FILL status for ${plate} - Already tracking this fill`);
+        console.log(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¾ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¹ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¯ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â FUEL FILL status for ${plate} - Already tracking this fill`);
+        return;
+      }
+      const engineIsOff = await this.isVehicleEngineOffForFill(plate, vehicleData.LocTime);
+      if (!engineIsOff) {
+        const statusInfo = await this.getLastEngineStatus(plate, vehicleData.LocTime);
+        console.log(
+          `[fill] Ignoring POSSIBLE FUEL FILL for ${plate} - latest engine status is ${
+            statusInfo?.status || 'UNKNOWN'
+          }`
+        );
         return;
       }
       // Get opening fuel from Postgres only: lowest value from the last 10 messages.
@@ -936,13 +993,14 @@ class EnergyRiteWebSocketClient {
 
       for (const entry of recentMessages) {
         if (entry.timestamp > statusTimestamp) continue;
-        if ((entry.combined_fuel_volume_in_tank || 0) <= 0) continue;
+        const entryFuel = this.parseNumericFuelValue(entry.combined_fuel_volume_in_tank);
+        if (entryFuel <= 0) continue;
 
         if (
           !lowestMessage ||
-          entry.combined_fuel_volume_in_tank < lowestMessage.combined_fuel_volume_in_tank ||
+          entryFuel < this.parseNumericFuelValue(lowestMessage.combined_fuel_volume_in_tank) ||
           (
-            entry.combined_fuel_volume_in_tank === lowestMessage.combined_fuel_volume_in_tank &&
+            entryFuel === this.parseNumericFuelValue(lowestMessage.combined_fuel_volume_in_tank) &&
             entry.timestamp > lowestMessage.timestamp
           )
         ) {
@@ -956,24 +1014,24 @@ class EnergyRiteWebSocketClient {
       console.log(`   Lowest from Postgres: ${lowestMessage ? lowestMessage.combined_fuel_volume_in_tank + 'L' : 'NONE'}`);
       
       if (lowestMessage) {
-        openingFuel = lowestMessage.combined_fuel_volume_in_tank;
-        openingPercentage = lowestMessage.combined_fuel_percentage;
-        openingFuelProbe1 = lowestMessage.fuel_probe_1_volume_in_tank;
-        openingFuelProbe2 = lowestMessage.fuel_probe_2_volume_in_tank;
-        openingPercentageProbe1 = lowestMessage.fuel_probe_1_level_percentage;
-        openingPercentageProbe2 = lowestMessage.fuel_probe_2_level_percentage;
+        openingFuel = this.parseNumericFuelValue(lowestMessage.combined_fuel_volume_in_tank);
+        openingPercentage = this.parseNumericFuelValue(lowestMessage.combined_fuel_percentage);
+        openingFuelProbe1 = this.parseNumericFuelValue(lowestMessage.fuel_probe_1_volume_in_tank);
+        openingFuelProbe2 = this.parseNumericFuelValue(lowestMessage.fuel_probe_2_volume_in_tank);
+        openingPercentageProbe1 = this.parseNumericFuelValue(lowestMessage.fuel_probe_1_level_percentage);
+        openingPercentageProbe2 = this.parseNumericFuelValue(lowestMessage.fuel_probe_2_level_percentage);
         openingLocTime = lowestMessage.locTime;
         console.log(`[fill] FUEL FILL START: ${plate} - Using Postgres lowest from last 10: ${openingFuel}L`);
       }
       
       if (openingFuel && openingFuel > 0) {
         const currentFuelData = hasFuelData ? this.parseFuelData(vehicleData) : null;
-        const highestFuel = currentFuelData?.combined_fuel_volume_in_tank ?? openingFuel;
-        const highestPercentage = currentFuelData?.combined_fuel_percentage ?? openingPercentage;
-        const highestFuelProbe1 = currentFuelData?.fuel_probe_1_volume_in_tank ?? openingFuelProbe1;
-        const highestFuelProbe2 = currentFuelData?.fuel_probe_2_volume_in_tank ?? openingFuelProbe2;
-        const highestPercentageProbe1 = currentFuelData?.fuel_probe_1_level_percentage ?? openingPercentageProbe1;
-        const highestPercentageProbe2 = currentFuelData?.fuel_probe_2_level_percentage ?? openingPercentageProbe2;
+        const highestFuel = this.parseNumericFuelValue(currentFuelData?.combined_fuel_volume_in_tank ?? openingFuel);
+        const highestPercentage = this.parseNumericFuelValue(currentFuelData?.combined_fuel_percentage ?? openingPercentage);
+        const highestFuelProbe1 = this.parseNumericFuelValue(currentFuelData?.fuel_probe_1_volume_in_tank ?? openingFuelProbe1);
+        const highestFuelProbe2 = this.parseNumericFuelValue(currentFuelData?.fuel_probe_2_volume_in_tank ?? openingFuelProbe2);
+        const highestPercentageProbe1 = this.parseNumericFuelValue(currentFuelData?.fuel_probe_1_level_percentage ?? openingPercentageProbe1);
+        const highestPercentageProbe2 = this.parseNumericFuelValue(currentFuelData?.fuel_probe_2_level_percentage ?? openingPercentageProbe2);
         const highestLocTime = currentFuelData ? vehicleData.LocTime : openingLocTime;
         const watcherStartLocTime = openingLocTime || vehicleData.LocTime;
         const watcherStartTime = this.convertLocTime(watcherStartLocTime);
@@ -997,13 +1055,13 @@ class EnergyRiteWebSocketClient {
           watcherType: 'FILL'
         });
         
-        console.log(`⛽ FUEL FILL START: ${plate} - Opening: ${openingFuel}L at ${watcherStartLocTime} (status at ${vehicleData.LocTime})`);
+        console.log(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂºÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â½ FUEL FILL START: ${plate} - Opening: ${openingFuel}L at ${watcherStartLocTime} (status at ${vehicleData.LocTime})`);
       } else {
-        console.log(`⚠️ FUEL FILL START: ${plate} - No Postgres baseline in last 10 messages, skipping watcher creation`);
+        console.log(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¯ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â FUEL FILL START: ${plate} - No Postgres baseline in last 10 messages, skipping watcher creation`);
         return;
       }
     } catch (error) {
-      console.error(`❌ Error starting fuel fill for ${plate}:`, error.message);
+      console.error(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬Â¦ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ Error starting fuel fill for ${plate}:`, error.message);
     }
   }
 
@@ -1025,7 +1083,7 @@ class EnergyRiteWebSocketClient {
             fuelData.fuel_probe_1_level_percentage,
             fuelData.fuel_probe_2_level_percentage
           );
-          console.log(`📈 New highest fuel for ${plate}: ${currentFuel}L`);
+          console.log(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã¢â‚¬Å“ÃƒÆ’Ã¢â‚¬Â¹ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â  New highest fuel for ${plate}: ${currentFuel}L`);
         }
         return;
       }
@@ -1046,10 +1104,10 @@ class EnergyRiteWebSocketClient {
           fuelData.fuel_probe_1_level_percentage,
           fuelData.fuel_probe_2_level_percentage
         );
-        console.log(`✅ Got opening fuel for fill: ${plate} - ${fuelData.combined_fuel_volume_in_tank}L`);
+        console.log(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã¢â‚¬Â¦ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¦ Got opening fuel for fill: ${plate} - ${fuelData.combined_fuel_volume_in_tank}L`);
       }
     } catch (error) {
-      console.error(`❌ Error checking fuel fill for ${plate}:`, error.message);
+      console.error(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬Â¦ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ Error checking fuel fill for ${plate}:`, error.message);
     }
   }
 
@@ -1063,12 +1121,13 @@ class EnergyRiteWebSocketClient {
       if (watcherType === 'FILL') {
         // Complete fuel fill using peak-based closing value.
         // Requirement: ending value is highest peak reached during the fill.
-        const closingFuel = watcher.highest_fuel;
-        const closingPercentage = watcher.highest_percentage;
+        const closingFuel = this.parseNumericFuelValue(watcher.highest_fuel);
+        const closingPercentage = this.parseNumericFuelValue(watcher.highest_percentage);
+        const openingFuel = this.parseNumericFuelValue(watcher.opening_fuel);
         const endTime = watcher.highest_loc_time
           ? this.convertLocTime(watcher.highest_loc_time)
           : new Date().toISOString();
-        const fillAmount = Math.max(0, closingFuel - watcher.opening_fuel);
+        const fillAmount = Math.max(0, closingFuel - openingFuel);
         if (fillAmount < 1) {
           console.log(`[fill] Skipping fill completion for ${plate} - change too small after stabilization (${fillAmount.toFixed(1)}L)`);
           pendingFuelDb.deleteFuelFillWatcher(plate);
@@ -1086,31 +1145,31 @@ class EnergyRiteWebSocketClient {
           session_end_time: endTime,
           operating_hours: duration / 3600,
           ...this.buildSessionFuelFields('opening', {
-            combined_fuel_volume_in_tank: watcher.opening_fuel,
-            combined_fuel_percentage: watcher.opening_percentage,
-            fuel_probe_1_volume_in_tank: watcher.opening_fuel_probe_1,
-            fuel_probe_2_volume_in_tank: watcher.opening_fuel_probe_2,
-            fuel_probe_1_level_percentage: watcher.opening_percentage_probe_1,
-            fuel_probe_2_level_percentage: watcher.opening_percentage_probe_2
+            combined_fuel_volume_in_tank: openingFuel,
+            combined_fuel_percentage: this.parseNumericFuelValue(watcher.opening_percentage),
+            fuel_probe_1_volume_in_tank: this.parseNumericFuelValue(watcher.opening_fuel_probe_1),
+            fuel_probe_2_volume_in_tank: this.parseNumericFuelValue(watcher.opening_fuel_probe_2),
+            fuel_probe_1_level_percentage: this.parseNumericFuelValue(watcher.opening_percentage_probe_1),
+            fuel_probe_2_level_percentage: this.parseNumericFuelValue(watcher.opening_percentage_probe_2)
           }),
           ...this.buildSessionFuelFields('closing', {
             combined_fuel_volume_in_tank: closingFuel,
             combined_fuel_percentage: closingPercentage,
-            fuel_probe_1_volume_in_tank: watcher.highest_fuel_probe_1,
-            fuel_probe_2_volume_in_tank: watcher.highest_fuel_probe_2,
-            fuel_probe_1_level_percentage: watcher.highest_percentage_probe_1,
-            fuel_probe_2_level_percentage: watcher.highest_percentage_probe_2
+            fuel_probe_1_volume_in_tank: this.parseNumericFuelValue(watcher.highest_fuel_probe_1),
+            fuel_probe_2_volume_in_tank: this.parseNumericFuelValue(watcher.highest_fuel_probe_2),
+            fuel_probe_1_level_percentage: this.parseNumericFuelValue(watcher.highest_percentage_probe_1),
+            fuel_probe_2_level_percentage: this.parseNumericFuelValue(watcher.highest_percentage_probe_2)
           }),
           total_fill: fillAmount,
           session_status: 'FUEL_FILL_COMPLETED',
-          notes: `Fuel fill completed. Duration: ${duration.toFixed(1)}s, Opening: ${watcher.opening_fuel}L, Peak closing: ${closingFuel}L, Filled: ${fillAmount.toFixed(1)}L`
+          notes: `Fuel fill completed. Duration: ${duration.toFixed(1)}s, Opening: ${openingFuel}L, Peak closing: ${closingFuel}L, Filled: ${fillAmount.toFixed(1)}L`
         });
 
         if (fillInsertError) {
           throw new Error(`Failed to insert completed fill session: ${fillInsertError.message}`);
         }
         
-        console.log(`⛽ FILL COMPLETE: ${plate} - ${watcher.opening_fuel}L → ${watcher.highest_fuel}L = +${fillAmount.toFixed(1)}L`);
+        console.log(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂºÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â½ FILL COMPLETE: ${plate} - ${watcher.opening_fuel}L ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ ${watcher.highest_fuel}L = +${fillAmount.toFixed(1)}L`);
         
         // Update engine session if active
         const { data: engineSessions } = await supabase
@@ -1123,7 +1182,10 @@ class EnergyRiteWebSocketClient {
           
         if (engineSessions && engineSessions.length > 0) {
           const session = engineSessions[0];
-          const usageBeforeFill = Math.max(0, session.opening_fuel - watcher.opening_fuel);
+          const usageBeforeFill = Math.max(
+            0,
+            this.parseNumericFuelValue(session.opening_fuel) - openingFuel
+          );
           
           await supabase
             .from('energy_rite_operating_sessions')
@@ -1132,10 +1194,10 @@ class EnergyRiteWebSocketClient {
               ...this.buildSessionFuelFields('opening', {
                 combined_fuel_volume_in_tank: closingFuel,
                 combined_fuel_percentage: closingPercentage,
-                fuel_probe_1_volume_in_tank: watcher.highest_fuel_probe_1,
-                fuel_probe_2_volume_in_tank: watcher.highest_fuel_probe_2,
-                fuel_probe_1_level_percentage: watcher.highest_percentage_probe_1,
-                fuel_probe_2_level_percentage: watcher.highest_percentage_probe_2
+                fuel_probe_1_volume_in_tank: this.parseNumericFuelValue(watcher.highest_fuel_probe_1),
+                fuel_probe_2_volume_in_tank: this.parseNumericFuelValue(watcher.highest_fuel_probe_2),
+                fuel_probe_1_level_percentage: this.parseNumericFuelValue(watcher.highest_percentage_probe_1),
+                fuel_probe_2_level_percentage: this.parseNumericFuelValue(watcher.highest_percentage_probe_2)
               }),
               fill_events: (session.fill_events || 0) + 1,
               fill_amount_during_session: (session.fill_amount_during_session || 0) + fillAmount,
@@ -1161,9 +1223,10 @@ class EnergyRiteWebSocketClient {
             FUEL_STABILITY_CONFIG.fillSettleWindowMs
           );
         }
-        const closingFuel = stabilizedFuel?.combined_fuel_volume_in_tank ?? watcher.lowest_fuel;
-        const closingPercentage = stabilizedFuel?.combined_fuel_percentage ?? watcher.lowest_percentage;
-        const theftAmount = Math.max(0, watcher.opening_fuel - closingFuel);
+        const openingFuel = this.parseNumericFuelValue(watcher.opening_fuel);
+        const closingFuel = this.parseNumericFuelValue(stabilizedFuel?.combined_fuel_volume_in_tank ?? watcher.lowest_fuel);
+        const closingPercentage = this.parseNumericFuelValue(stabilizedFuel?.combined_fuel_percentage ?? watcher.lowest_percentage);
+        const theftAmount = Math.max(0, openingFuel - closingFuel);
         if (theftAmount < 1) {
           console.log(`[theft] Skipping theft completion for ${plate} - change too small after stabilization (${theftAmount.toFixed(1)}L)`);
           pendingFuelDb.deleteFuelFillWatcher(plate);
@@ -1184,38 +1247,38 @@ class EnergyRiteWebSocketClient {
           session_end_time: endTime,
           operating_hours: duration / 3600,
           ...this.buildSessionFuelFields('opening', {
-            combined_fuel_volume_in_tank: watcher.opening_fuel,
-            combined_fuel_percentage: watcher.opening_percentage,
-            fuel_probe_1_volume_in_tank: watcher.opening_fuel_probe_1,
-            fuel_probe_2_volume_in_tank: watcher.opening_fuel_probe_2,
-            fuel_probe_1_level_percentage: watcher.opening_percentage_probe_1,
-            fuel_probe_2_level_percentage: watcher.opening_percentage_probe_2
+            combined_fuel_volume_in_tank: openingFuel,
+            combined_fuel_percentage: this.parseNumericFuelValue(watcher.opening_percentage),
+            fuel_probe_1_volume_in_tank: this.parseNumericFuelValue(watcher.opening_fuel_probe_1),
+            fuel_probe_2_volume_in_tank: this.parseNumericFuelValue(watcher.opening_fuel_probe_2),
+            fuel_probe_1_level_percentage: this.parseNumericFuelValue(watcher.opening_percentage_probe_1),
+            fuel_probe_2_level_percentage: this.parseNumericFuelValue(watcher.opening_percentage_probe_2)
           }),
           ...this.buildSessionFuelFields('closing', stabilizedFuel || {
             combined_fuel_volume_in_tank: closingFuel,
             combined_fuel_percentage: closingPercentage,
-            fuel_probe_1_volume_in_tank: watcher.lowest_fuel_probe_1,
-            fuel_probe_2_volume_in_tank: watcher.lowest_fuel_probe_2,
-            fuel_probe_1_level_percentage: watcher.lowest_percentage_probe_1,
-            fuel_probe_2_level_percentage: watcher.lowest_percentage_probe_2
+            fuel_probe_1_volume_in_tank: this.parseNumericFuelValue(watcher.lowest_fuel_probe_1),
+            fuel_probe_2_volume_in_tank: this.parseNumericFuelValue(watcher.lowest_fuel_probe_2),
+            fuel_probe_1_level_percentage: this.parseNumericFuelValue(watcher.lowest_percentage_probe_1),
+            fuel_probe_2_level_percentage: this.parseNumericFuelValue(watcher.lowest_percentage_probe_2)
           }),
           total_fill: -theftAmount,
           session_status: 'FUEL_THEFT_COMPLETED',
-          notes: `Fuel theft completed. Duration: ${duration.toFixed(1)}s, Opening: ${watcher.opening_fuel}L, Stable closing: ${closingFuel}L, Lowest seen: ${watcher.lowest_fuel}L, Lost: ${theftAmount.toFixed(1)}L`
+          notes: `Fuel theft completed. Duration: ${duration.toFixed(1)}s, Opening: ${openingFuel}L, Stable closing: ${closingFuel}L, Lowest seen: ${this.parseNumericFuelValue(watcher.lowest_fuel)}L, Lost: ${theftAmount.toFixed(1)}L`
         });
 
         if (theftInsertError) {
           throw new Error(`Failed to insert completed theft session: ${theftInsertError.message}`);
         }
         
-        console.log(`🚨 THEFT COMPLETE: ${plate} - ${watcher.opening_fuel}L → ${watcher.lowest_fuel}L = -${theftAmount.toFixed(1)}L`);
+        console.log(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¨ THEFT COMPLETE: ${plate} - ${watcher.opening_fuel}L ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ ${watcher.lowest_fuel}L = -${theftAmount.toFixed(1)}L`);
         
         // Record in anomalies table
         await supabase.from('energy_rite_fuel_anomalies').insert({
           plate: plate,
           anomaly_type: 'FUEL_THEFT',
           anomaly_date: endTime,
-          fuel_before: watcher.opening_fuel,
+          fuel_before: openingFuel,
           fuel_after: closingFuel,
           difference: -theftAmount,
           severity: theftAmount >= 100 ? 'CRITICAL' : theftAmount >= 50 ? 'HIGH' : 'MEDIUM',
@@ -1229,7 +1292,7 @@ class EnergyRiteWebSocketClient {
       
       pendingFuelDb.deleteFuelFillWatcher(plate);
     } catch (error) {
-      console.error(`❌ Error completing watcher for ${plate}:`, error.message);
+      console.error(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬Â¦ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ Error completing watcher for ${plate}:`, error.message);
     }
   }
 
@@ -1238,13 +1301,13 @@ class EnergyRiteWebSocketClient {
       this.reconnectAttempts++;
       const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 30000);
       
-      console.log(`🔄 Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts})`);
+      console.log(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¾ Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts})`);
       
       setTimeout(() => {
         this.connect();
       }, delay);
     } else {
-      console.error('❌ Max reconnection attempts reached');
+      console.error('ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬Â¦ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ Max reconnection attempts reached');
     }
   }
 
@@ -1252,32 +1315,32 @@ class EnergyRiteWebSocketClient {
 
   async storeFuelData(vehicleData) {
     try {
-      const fuelLevel = parseFloat(vehicleData.fuel_probe_1_level);
-      const fuelPercentage = parseFloat(vehicleData.fuel_probe_1_level_percentage);
+      const fuelLevel = this.parseNumericFuelValue(vehicleData.fuel_probe_1_level);
+      const fuelPercentage = this.parseNumericFuelValue(vehicleData.fuel_probe_1_level_percentage);
       const fuelProbe1Volume = this.parseNumericFuelValue(vehicleData.fuel_probe_1_volume_in_tank);
       const fuelProbe2Volume = this.parseNumericFuelValue(vehicleData.fuel_probe_2_volume_in_tank);
       const hasVolumeSignal = fuelProbe1Volume > 0 || fuelProbe2Volume > 0;
 
-      if ((!Number.isFinite(fuelLevel) || fuelLevel <= 0) && !hasVolumeSignal) return;
+      if (fuelLevel <= 0 && !hasVolumeSignal) return;
       
       const timestamp = this.convertLocTime(vehicleData.LocTime);
       
       await supabase.from('energy_rite_fuel_data').insert({
         plate: vehicleData.actualBranch || vehicleData.Plate,
-        fuel_probe_1_level: Number.isFinite(fuelLevel) ? fuelLevel : 0,
-        fuel_probe_1_level_percentage: Number.isFinite(fuelPercentage) ? fuelPercentage : 0,
+        fuel_probe_1_level: fuelLevel,
+        fuel_probe_1_level_percentage: fuelPercentage,
         fuel_probe_1_volume_in_tank: fuelProbe1Volume,
-        fuel_probe_2_level: parseFloat(vehicleData.fuel_probe_2_level) || 0,
-        fuel_probe_2_level_percentage: parseFloat(vehicleData.fuel_probe_2_level_percentage) || 0,
+        fuel_probe_2_level: this.parseNumericFuelValue(vehicleData.fuel_probe_2_level),
+        fuel_probe_2_level_percentage: this.parseNumericFuelValue(vehicleData.fuel_probe_2_level_percentage),
         fuel_probe_2_volume_in_tank: fuelProbe2Volume,
-        fuel_probe_2_temperature: parseFloat(vehicleData.fuel_probe_2_temperature) || 0,
+        fuel_probe_2_temperature: this.parseNumericFuelValue(vehicleData.fuel_probe_2_temperature),
         created_at: timestamp
       });
       
-      console.log(`⛽ Stored fuel data for ${vehicleData.actualBranch || vehicleData.Plate}: ${fuelLevel}L (${fuelPercentage}%)`);
+      console.log(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂºÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â½ Stored fuel data for ${vehicleData.actualBranch || vehicleData.Plate}: ${fuelLevel}L (${fuelPercentage}%)`);
       
     } catch (error) {
-      console.error(`❌ Error storing fuel data for ${vehicleData.actualBranch || vehicleData.Plate}:`, error.message);
+      console.error(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬Â¦ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ Error storing fuel data for ${vehicleData.actualBranch || vehicleData.Plate}:`, error.message);
     }
   }
 
@@ -1310,12 +1373,12 @@ class EnergyRiteWebSocketClient {
           currentFuel = currentFuelFields.closing_fuel || 0;
           currentPercentage = currentFuelFields.closing_percentage || 0;
         } else {
-          console.log(`⏳ No fuel data in WebSocket for ${plate}, waiting for next message`);
+          console.log(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â³ No fuel data in WebSocket for ${plate}, waiting for next message`);
           return; // Don't complete session without fuel data
         }
         
         const fillAmount = Math.max(0, currentFuel - startingFuel);
-        console.log(`⛽ FUEL FILL COMPLETE: ${plate} - ${startingFuel}L → ${currentFuel}L = +${fillAmount.toFixed(1)}L`);
+        console.log(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂºÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â½ FUEL FILL COMPLETE: ${plate} - ${startingFuel}L ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ ${currentFuel}L = +${fillAmount.toFixed(1)}L`);
         
         await supabase.from('energy_rite_operating_sessions')
           .update({
@@ -1328,7 +1391,7 @@ class EnergyRiteWebSocketClient {
           })
           .eq('id', session.id);
           
-        console.log(`⛽ FUEL FILL COMPLETE: ${plate} - Duration: ${duration.toFixed(0)}s, Filled: ${fillAmount.toFixed(1)}L`);
+        console.log(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂºÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â½ FUEL FILL COMPLETE: ${plate} - Duration: ${duration.toFixed(0)}s, Filled: ${fillAmount.toFixed(1)}L`);
         
         // Update any ongoing engine session
         if (fillAmount > 0) {
@@ -1356,33 +1419,114 @@ class EnergyRiteWebSocketClient {
       }
       
     } catch (error) {
-      console.error(`❌ Error completing fuel fill session for ${plate}:`, error.message);
+      console.error(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬Â¦ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ Error completing fuel fill session for ${plate}:`, error.message);
     }
   }
 
-  parseEngineStatus(driverName) {
+  updateLastEngineStatus(plate, status, locTime = null, source = 'stream', driverName = null) {
+    if (!plate || !status) return;
+
+    const normalizedStatus = status === 'ON' ? 'ON' : status === 'OFF' ? 'OFF' : null;
+    if (!normalizedStatus) return;
+
+    const timestamp = locTime
+      ? new Date(this.convertLocTime(locTime)).getTime()
+      : Date.now();
+
+    this.lastEngineStatusByPlate.set(plate, {
+      status: normalizedStatus,
+      locTime: locTime || null,
+      timestamp,
+      source,
+      driverName: driverName || null
+    });
+  }
+
+  async getLastEngineStatus(plate, targetLocTime = null) {
+    const fromMemory = this.lastEngineStatusByPlate.get(plate);
+    const targetTimestamp = targetLocTime
+      ? new Date(this.convertLocTime(targetLocTime)).getTime()
+      : Date.now();
+
+    if (
+      fromMemory &&
+      Number.isFinite(fromMemory.timestamp) &&
+      Math.abs(targetTimestamp - fromMemory.timestamp) <= ENGINE_STATUS_LOOKBACK_MS
+    ) {
+      return fromMemory;
+    }
+
+    try {
+      const beforeTimeIso = targetLocTime ? this.convertLocTime(targetLocTime) : undefined;
+      const recentStatusMessages = await postgresMessageStore.getRecentStatusMessages(plate, 25, { beforeTimeIso });
+
+      for (const entry of recentStatusMessages) {
+        const status = this.parseEngineStatus(entry.driver_name, { silent: true });
+        if (!status) continue;
+
+        this.updateLastEngineStatus(plate, status, entry.locTime, 'postgres_history', entry.driver_name);
+        return this.lastEngineStatusByPlate.get(plate) || null;
+      }
+    } catch (error) {
+      console.error(`[engine] Failed to load last engine status for ${plate}:`, error.message);
+    }
+
+    return fromMemory || null;
+  }
+
+  async isVehicleEngineOffForFill(plate, targetLocTime = null) {
+    const statusInfo = await this.getLastEngineStatus(plate, targetLocTime);
+    if (!statusInfo || statusInfo.status !== 'OFF') {
+      return false;
+    }
+
+    const { data: sessions, error } = await supabase
+      .from('energy_rite_operating_sessions')
+      .select('id')
+      .eq('branch', plate)
+      .eq('session_status', 'ONGOING')
+      .limit(1);
+
+    if (error) {
+      console.error(`[fill] Failed to verify engine session state for ${plate}:`, error.message);
+      return false;
+    }
+
+    return !sessions || sessions.length === 0;
+  }
+
+  parseEngineStatus(driverName, options = {}) {
+    const silent = options.silent === true;
     if (!driverName || driverName.trim() === '') {
       return null;
     }
     
     const normalized = driverName.replace(/\s+/g, ' ').trim().toUpperCase();
-    console.log(`🔍 Checking engine status: "${driverName}" -> "${normalized}"`);
+    if (!silent) {
+      console.log(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â Checking engine status: "${driverName}" -> "${normalized}"`);
+    }
     
     // Priority detection: ENGINE, IGNITION, and PTO status
     if (normalized.includes('ENGINE ON') || 
         normalized.includes('IGNITION ON') || 
         normalized.includes('PTO ON')) {
-      console.log(`🟢 ENGINE/IGNITION ON DETECTED: ${driverName}`);
+      if (!silent) {
+        console.log(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ ENGINE/IGNITION ON DETECTED: ${driverName}`);
+      }
       return 'ON';
     }
     if (normalized.includes('ENGINE OFF') || 
         normalized.includes('IGNITION OFF') || 
         normalized.includes('PTO OFF')) {
-      console.log(`🔴 ENGINE/IGNITION OFF DETECTED: ${driverName}`);
+      if (!silent) {
+        console.log(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â´ ENGINE/IGNITION OFF DETECTED: ${driverName}`);
+      }
       return 'OFF';
     }
     
-    console.log(`ℹ️ No engine/ignition status detected in: "${driverName}"`);
+    if (!silent) {
+      console.log(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¾ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¹ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¯ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â No engine/ignition status detected in: "${driverName}"`);
+    }
     return null;
   }
 
@@ -1392,15 +1536,15 @@ class EnergyRiteWebSocketClient {
     }
     
     const normalized = driverName.replace(/\s+/g, ' ').trim().toUpperCase();
-    console.log(`🔍 Checking fuel fill status: "${driverName}" -> "${normalized}"`);
+    console.log(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â Checking fuel fill status: "${driverName}" -> "${normalized}"`);
     
     // Only trigger fills when status explicitly says "Possible Fuel Fill"
     if (normalized.includes('POSSIBLE FUEL FILL')) {
-      console.log(`⛽ POSSIBLE FUEL FILL DETECTED: ${driverName}`);
+      console.log(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂºÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â½ POSSIBLE FUEL FILL DETECTED: ${driverName}`);
       return 'START';
     }
     
-    console.log(`ℹ️ No fuel fill status detected in: "${driverName}"`);
+    console.log(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¾ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¹ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¯ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â No fuel fill status detected in: "${driverName}"`);
     return null;
   }
 
@@ -1413,7 +1557,7 @@ class EnergyRiteWebSocketClient {
     
     if (normalized.includes('POSSIBLE FUEL THEFT') ||
         normalized.includes('FUEL THEFT')) {
-      console.log(`🚨 FUEL THEFT STATUS DETECTED: ${driverName}`);
+      console.log(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¨ FUEL THEFT STATUS DETECTED: ${driverName}`);
       return 'START';
     }
     
@@ -1423,8 +1567,8 @@ class EnergyRiteWebSocketClient {
   async handleFuelTheftStart(plate, vehicleData) {
     try {
       const currentTime = this.convertLocTime(vehicleData.LocTime);
-      const currentFuel = parseFloat(vehicleData.fuel_probe_1_volume_in_tank) || 0;
-      const currentPercentage = parseFloat(vehicleData.fuel_probe_1_level_percentage) || 0;
+      const currentFuel = this.parseNumericFuelValue(vehicleData.fuel_probe_1_volume_in_tank);
+      const currentPercentage = this.parseNumericFuelValue(vehicleData.fuel_probe_1_level_percentage);
       
       // Find highest fuel before theft (last 30 minutes) - like finding lowest for fills
       const currentTimestamp = new Date(currentTime).getTime();
@@ -1454,7 +1598,7 @@ class EnergyRiteWebSocketClient {
       const endTimeMs = new Date(endTime).getTime();
       const duration = (endTimeMs - startTimeMs) / 1000;
       
-      console.log(`🚨 FUEL THEFT: ${plate} - ${highestFuel}L → ${currentFuel}L = -${theftAmount.toFixed(1)}L`);
+      console.log(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¨ FUEL THEFT: ${plate} - ${highestFuel}L ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ ${currentFuel}L = -${theftAmount.toFixed(1)}L`);
       
       // Record as session (exactly like fuel fill but measuring loss)
       await supabase.from('energy_rite_operating_sessions').insert({
@@ -1474,7 +1618,7 @@ class EnergyRiteWebSocketClient {
         notes: `Fuel theft completed. Duration: ${duration.toFixed(1)}s, Opening: ${highestFuel}L, Closing: ${currentFuel}L, Lost: ${theftAmount.toFixed(1)}L`
       });
       
-      console.log(`🚨 FUEL THEFT COMPLETE: ${plate} - ${highestFuel}L → ${currentFuel}L = -${theftAmount.toFixed(1)}L`);
+      console.log(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¨ FUEL THEFT COMPLETE: ${plate} - ${highestFuel}L ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ ${currentFuel}L = -${theftAmount.toFixed(1)}L`);
       
       // Also record in anomalies table for alerts
       await supabase.from('energy_rite_fuel_anomalies').insert({
@@ -1494,13 +1638,13 @@ class EnergyRiteWebSocketClient {
       });
       
     } catch (error) {
-      console.error(`❌ Error handling fuel theft for ${plate}:`, error.message);
+      console.error(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬Â¦ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ Error handling fuel theft for ${plate}:`, error.message);
     }
   }
 
   async handleFuelFill(plate, fillResult) {
     try {
-      console.log(`⛽ Handling fuel fill for ${plate}:`, fillResult.fillDetails);
+      console.log(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂºÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â½ Handling fuel fill for ${plate}:`, fillResult.fillDetails);
       
       // Update any ongoing session with fill information
       const { data: ongoingSessions } = await supabase
@@ -1526,11 +1670,11 @@ class EnergyRiteWebSocketClient {
           })
           .eq('id', session.id);
           
-        console.log(`🔋 Updated session ${session.id} with fill: +${fillResult.fillDetails.fillAmount.toFixed(1)}L`);
+        console.log(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¹ Updated session ${session.id} with fill: +${fillResult.fillDetails.fillAmount.toFixed(1)}L`);
       }
       
     } catch (error) {
-      console.error(`❌ Error handling fuel fill for ${plate}:`, error.message);
+      console.error(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬Â¦ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ Error handling fuel fill for ${plate}:`, error.message);
     }
   }
 
@@ -1562,14 +1706,14 @@ class EnergyRiteWebSocketClient {
             notes: `Fuel fill started. Opening: ${openingFuel}L (${openingPercentage}%)`
           });
           
-          console.log(`⛽ FUEL FILL START: ${plate} - Opening: ${openingFuel}L (${openingPercentage}%)`);
+          console.log(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂºÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â½ FUEL FILL START: ${plate} - Opening: ${openingFuel}L (${openingPercentage}%)`);
         } else {
-          console.log(`⛽ FUEL FILL ONGOING: ${plate} - Session already exists`);
+          console.log(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂºÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â½ FUEL FILL ONGOING: ${plate} - Session already exists`);
         }
       }
       
     } catch (error) {
-      console.error(`❌ Error handling fuel fill session for ${plate}:`, error.message);
+      console.error(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬Â¦ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ Error handling fuel fill session for ${plate}:`, error.message);
     }
   }
 
@@ -1746,13 +1890,13 @@ class EnergyRiteWebSocketClient {
     const sample = readings.slice(-Math.max(minSamples, FUEL_STABILITY_CONFIG.medianSampleSize));
     const spread = this.getFuelSpread(sample);
     if (spread > maxSpreadLiters) {
-      console.log(`⏳ Stable fuel not confirmed for ${plate}: spread ${spread.toFixed(1)}L across ${sample.length} samples`);
+      console.log(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â³ Stable fuel not confirmed for ${plate}: spread ${spread.toFixed(1)}L across ${sample.length} samples`);
       return null;
     }
 
     const stableReading = this.getMedianFuelReading(sample);
     if (stableReading) {
-      console.log(`🎯 Confirmed stable fuel AFTER ${plate}: ${stableReading.combined_fuel_volume_in_tank}L from ${sample.length} samples (spread ${spread.toFixed(1)}L)`);
+      console.log(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¯ Confirmed stable fuel AFTER ${plate}: ${stableReading.combined_fuel_volume_in_tank}L from ${sample.length} samples (spread ${spread.toFixed(1)}L)`);
     }
     return stableReading;
   }
@@ -1767,7 +1911,7 @@ class EnergyRiteWebSocketClient {
 
     const stabilized = this.getMedianFuelReading(readings);
     if (stabilized) {
-      console.log(`ðŸŽ¯ Stabilized fuel BEFORE ${plate}: ${stabilized.combined_fuel_volume_in_tank}L from ${readings.length} samples`);
+      console.log(`ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â°ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â½ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¯ Stabilized fuel BEFORE ${plate}: ${stabilized.combined_fuel_volume_in_tank}L from ${readings.length} samples`);
     }
     return stabilized;
   }
@@ -1789,7 +1933,7 @@ class EnergyRiteWebSocketClient {
 
     const stabilized = this.getMedianFuelReading(readings);
     if (stabilized) {
-      console.log(`ðŸŽ¯ Stabilized fuel AFTER ${plate}: ${stabilized.combined_fuel_volume_in_tank}L from ${readings.length} samples`);
+      console.log(`ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â°ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â½ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¯ Stabilized fuel AFTER ${plate}: ${stabilized.combined_fuel_volume_in_tank}L from ${readings.length} samples`);
     }
     return stabilized;
   }
@@ -1853,7 +1997,7 @@ class EnergyRiteWebSocketClient {
           
         if (sessions && Array.isArray(sessions) && sessions.length > 0) {
           const session = sessions[0];
-          const closingFuel = await this.findHighestFuelFromLastMessages(plate, wsMessage.LocTime, 10);
+          const closingFuel = await this.findSessionClosingFuelFromLastMessages(plate, wsMessage.LocTime, 10);
 
           if (closingFuel) {
             const captureDetails = this.buildCaptureDetails(closingFuel, 'after');
@@ -1891,7 +2035,7 @@ class EnergyRiteWebSocketClient {
       const preFillLevel = parsedFuel.combined_fuel_level || 0;
       const preFillPercentage = parsedFuel.combined_fuel_percentage || 0;
       
-      console.log(`⛽ Fuel fill detected for ${plate} - Pre-fill: ${preFillLevel}L (${preFillPercentage}%)`);
+      console.log(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂºÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â½ Fuel fill detected for ${plate} - Pre-fill: ${preFillLevel}L (${preFillPercentage}%)`);
       
       if (!this.fuelFillTracking) this.fuelFillTracking = new Map();
       
@@ -1903,7 +2047,7 @@ class EnergyRiteWebSocketClient {
       });
       
     } catch (error) {
-      console.error(`❌ Error handling fuel fill start for ${plate}:`, error.message);
+      console.error(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬Â¦ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ Error handling fuel fill start for ${plate}:`, error.message);
     }
   }
 
@@ -1921,7 +2065,7 @@ class EnergyRiteWebSocketClient {
       const currentTime = vehicleData.LocTime ? new Date(vehicleData.LocTime) : new Date();
       const fillDuration = (currentTime - tracking.fillStartTime) / 1000;
       
-      console.log(`⛽ Fuel fill ended for ${plate}: +${fillAmount.toFixed(1)}L`);
+      console.log(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂºÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â½ Fuel fill ended for ${plate}: +${fillAmount.toFixed(1)}L`);
       
       if (fillAmount > 5) { // Only record significant fills
         // Get vehicle info
@@ -1947,10 +2091,10 @@ class EnergyRiteWebSocketClient {
           ...this.buildSessionFuelFields('closing', currentFuelData),
           total_fill: fillAmount,
           session_status: 'FUEL_FILL',
-          notes: `Fuel Fill: +${fillAmount.toFixed(1)}L (${tracking.preFillLevel}L → ${currentFuelLevel}L) Duration: ${fillDuration.toFixed(0)}s`
+          notes: `Fuel Fill: +${fillAmount.toFixed(1)}L (${tracking.preFillLevel}L ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ ${currentFuelLevel}L) Duration: ${fillDuration.toFixed(0)}s`
         });
         
-        console.log(`⛽ Fuel fill session created: ${plate} +${fillAmount.toFixed(1)}L`);
+        console.log(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂºÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â½ Fuel fill session created: ${plate} +${fillAmount.toFixed(1)}L`);
         
         // Also update any ongoing engine session
         const { data: ongoingSessions } = await supabase
@@ -1978,7 +2122,7 @@ class EnergyRiteWebSocketClient {
       this.fuelFillTracking.delete(plate);
       
     } catch (error) {
-      console.error(`❌ Error handling fuel fill end for ${plate}:`, error.message);
+      console.error(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬Â¦ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ Error handling fuel fill end for ${plate}:`, error.message);
     }
   }
 
@@ -1991,7 +2135,8 @@ class EnergyRiteWebSocketClient {
     try {
       const closingFuelFields = this.buildSessionFuelFields('closing', vehicleData);
       const closingFuel = closingFuelFields.closing_fuel || 0;
-      const closingPercentage = closingFuelFields.closing_percentage || 0;
+      const closingFuelProbe1 = closingFuelFields.closing_fuel_probe_1 || 0;
+      const closingFuelProbe2 = closingFuelFields.closing_fuel_probe_2 || 0;
       const closingVolume = closingFuel;
       const closingTemperature = this.parseNumericFuelValue(vehicleData.combined_fuel_temperature);
       
@@ -1999,16 +2144,25 @@ class EnergyRiteWebSocketClient {
       const endTimeDate = new Date(endTime);
       const durationMs = endTimeDate.getTime() - startTime.getTime();
       const operatingHours = Math.max(0, durationMs / (1000 * 60 * 60));
-      const startingFuel = session.opening_fuel || 0;
+      const startingFuel = this.parseNumericFuelValue(session.opening_fuel);
+      const startingFuelProbe1 = this.parseNumericFuelValue(session.opening_fuel_probe_1);
+      const startingFuelProbe2 = this.parseNumericFuelValue(session.opening_fuel_probe_2);
       
       // Add any accumulated usage from fills during session
-      const accumulatedUsage = session.total_usage || 0;
+      const accumulatedUsage = this.parseNumericFuelValue(session.total_usage);
       
-      // Calculate final usage: accumulated + (opening - closing)
-      const finalUsage = accumulatedUsage + Math.max(0, startingFuel - closingFuel);
+      // Calculate session segment usage from both combined and probe-level deltas.
+      // Using the best positive delta avoids false zero-usage sessions when one signal is noisy.
+      const combinedSegmentUsage = Math.max(0, startingFuel - closingFuel);
+      const probe1SegmentUsage = Math.max(0, startingFuelProbe1 - closingFuelProbe1);
+      const probe2SegmentUsage = Math.max(0, startingFuelProbe2 - closingFuelProbe2);
+      const probeSegmentUsage = probe1SegmentUsage + probe2SegmentUsage;
+      const segmentUsage = Math.max(combinedSegmentUsage, probeSegmentUsage);
+      const finalUsage = accumulatedUsage + segmentUsage;
       const fuelCost = finalUsage * 20;
       const literUsagePerHour = operatingHours > 0 ? finalUsage / operatingHours : 0;
       const captureSuffix = captureDetails ? `, Capture: ${captureDetails}` : '';
+      const usageDebug = `, SegmentUsed: ${segmentUsage.toFixed(1)}L (combined ${combinedSegmentUsage.toFixed(1)}L, probe1 ${probe1SegmentUsage.toFixed(1)}L, probe2 ${probe2SegmentUsage.toFixed(1)}L, accumulated ${accumulatedUsage.toFixed(1)}L)`;
       
       await supabase.from('energy_rite_operating_sessions')
         .update({
@@ -2021,13 +2175,13 @@ class EnergyRiteWebSocketClient {
           liter_usage_per_hour: literUsagePerHour,
           cost_for_usage: fuelCost,
           session_status: 'COMPLETED',
-          notes: `Engine stopped. Duration: ${operatingHours.toFixed(2)}h, Opening: ${startingFuel}L, Closing: ${closingFuel}L, Used: ${finalUsage.toFixed(1)}L${captureSuffix}`
+          notes: `Engine stopped. Duration: ${operatingHours.toFixed(2)}h, Opening: ${startingFuel}L, Closing: ${closingFuel}L, Used: ${finalUsage.toFixed(1)}L${usageDebug}${captureSuffix}`
         })
         .eq('id', session.id);
         
-      console.log(`🔴 Engine OFF: ${session.branch} - Used: ${finalUsage.toFixed(1)}L in ${operatingHours.toFixed(2)}h`);
+      console.log(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â´ Engine OFF: ${session.branch} - Used: ${finalUsage.toFixed(1)}L in ${operatingHours.toFixed(2)}h`);
     } catch (error) {
-      console.error(`❌ Error completing session:`, error.message);
+      console.error(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬Â¦ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ Error completing session:`, error.message);
     }
   }
 
@@ -2036,7 +2190,7 @@ class EnergyRiteWebSocketClient {
       if (!this.pendingClosures.has(plate)) return;
       
       const pending = this.pendingClosures.get(plate);
-      const closestFuel = await this.findHighestFuelFromLastMessages(plate, pending.statusLocTime, 10);
+      const closestFuel = await this.findSessionClosingFuelFromLastMessages(plate, pending.statusLocTime, 10);
       if (!closestFuel) {
         console.log(`[session] Waiting for last-10 history to include valid ENGINE OFF fuel for ${plate}`);
         return;
