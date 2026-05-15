@@ -210,6 +210,7 @@ class EnergyRiteWebSocketClient {
       
       // Parse fuel data from Temperature field if present
       const fuelData = this.parseFuelData(vehicleData);
+      const isCanBusPacket = this.isCanBusTelemetryPacket(vehicleData);
       const speed = parseFloat(vehicleData.Speed) || 0;
       const normalizedLocTime = this.convertLocTime(vehicleData.LocTime);
 
@@ -259,25 +260,29 @@ class EnergyRiteWebSocketClient {
         await this.updatePendingClosure(actualBranch, vehicleData);
       }
       
-      // Handle engine/ignition status FIRST
-      const engineStatus = this.parseEngineStatus(vehicleData.DriverName);
-      if (engineStatus) {
-        this.updateLastEngineStatus(actualBranch, engineStatus, vehicleData.LocTime, 'stream', vehicleData.DriverName);
-        console.log(`[engine] Processing ${engineStatus} for ${actualBranch}`);
-        await this.handleSessionChange(actualBranch, engineStatus, vehicleData);
-      }
-      
-      // Only start fuel fills when the status explicitly says "Possible Fuel Fill"
-      const fuelFillStatus = this.parseFuelFillStatus(vehicleData.DriverName);
-      if (fuelFillStatus) {
-        await this.handleFuelFillStart(actualBranch, vehicleData);
-      }
+      if (isCanBusPacket) {
+        console.log(`[fuel] Skipping CAN-bus packet for session/fill logic: ${actualBranch}`);
+      } else {
+        // Handle engine/ignition status FIRST
+        const engineStatus = this.parseEngineStatus(vehicleData.DriverName);
+        if (engineStatus) {
+          this.updateLastEngineStatus(actualBranch, engineStatus, vehicleData.LocTime, 'stream', vehicleData.DriverName);
+          console.log(`[engine] Processing ${engineStatus} for ${actualBranch}`);
+          await this.handleSessionChange(actualBranch, engineStatus, vehicleData);
+        }
+        
+        // Only start fuel fills when the status explicitly says "Possible Fuel Fill"
+        const fuelFillStatus = this.parseFuelFillStatus(vehicleData.DriverName);
+        if (fuelFillStatus) {
+          await this.handleFuelFillStart(actualBranch, vehicleData);
+        }
 
-      // Fuel thefts are handled by unified engine-off fuel-change detection.
-      
-      // Waterford fuel monitoring: fills and thefts when engine OFF
-      if (fuelData.hasFuelData) {
-        await this.detectWaterfordFuelChanges(actualBranch, fuelData, vehicleData.LocTime, speed);
+        // Fuel thefts are handled by unified engine-off fuel-change detection.
+        
+        // Waterford fuel monitoring: fills and thefts when engine OFF
+        if (fuelData.hasFuelData) {
+          await this.detectWaterfordFuelChanges(actualBranch, fuelData, vehicleData.LocTime, speed);
+        }
       }
 
     } catch (error) {
@@ -288,6 +293,10 @@ class EnergyRiteWebSocketClient {
 
 
   parseFuelData(vehicleData) {
+    if (this.isCanBusTelemetryPacket(vehicleData)) {
+      return { hasFuelData: false, ignoredReason: 'CANBUS_PACKET' };
+    }
+
     if (!this.hasExplicitFuelFields(vehicleData)) {
       return { hasFuelData: false };
     }
@@ -345,6 +354,32 @@ class EnergyRiteWebSocketClient {
 
   hasFuelValue(value) {
     return value !== undefined && value !== null && String(value).trim() !== '';
+  }
+
+  isCanBusTelemetryPacket(vehicleData) {
+    if (!vehicleData) return false;
+
+    const canBusKeys = [
+      'canbus_voltage_1',
+      'canbus_voltage_2',
+      'canbus_rpm',
+      'canbus_speed',
+      'canbus_coolant_temperature',
+      'canbus_oil_temperature',
+      'canbus_throttle',
+      'canbus_oil_pressure'
+    ];
+
+    const hasCanBusDecodedFields = canBusKeys.some((key) => this.hasFuelValue(vehicleData[key]));
+    if (hasCanBusDecodedFields) {
+      return true;
+    }
+
+    const messageType = String(vehicleData.message_type || '').trim();
+    const temperatureRaw = String(vehicleData.Temperature || '').toUpperCase();
+    const hasCanBusVoltageIds = temperatureRaw.includes(',1087,') || temperatureRaw.includes(',1088,');
+
+    return messageType === '405' && hasCanBusVoltageIds;
   }
 
   hasExplicitFuelFields(vehicleData) {
