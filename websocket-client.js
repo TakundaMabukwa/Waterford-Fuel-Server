@@ -25,7 +25,11 @@ class EnergyRiteWebSocketClient {
     this.wsUrl = wsUrl;
     this.ws = null;
     this.reconnectAttempts = 0;
-    this.maxReconnectAttempts = 10;
+    this.maxReconnectAttempts = (() => {
+      const parsed = parseInt(process.env.WS_MAX_RECONNECT_ATTEMPTS || '0', 10);
+      return Number.isFinite(parsed) ? parsed : 0;
+    })();
+    this.reconnectTimer = null;
     this.testMode = wsUrl === 'dummy';
     this.pendingFuelUpdates = new Map();
     this.pendingClosures = new Map();
@@ -136,6 +140,10 @@ class EnergyRiteWebSocketClient {
       this.ws.on('open', () => {
         console.log('ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã¢â‚¬Â¦ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¦ WebSocket connected');
         this.reconnectAttempts = 0;
+        if (this.reconnectTimer) {
+          clearTimeout(this.reconnectTimer);
+          this.reconnectTimer = null;
+        }
       });
 
       this.ws.on('message', async (data) => {
@@ -1332,17 +1340,28 @@ class EnergyRiteWebSocketClient {
   }
 
   reconnect() {
-    if (this.reconnectAttempts < this.maxReconnectAttempts) {
+    if (this.reconnectTimer) {
+      return;
+    }
+
+    const isUnlimited = this.maxReconnectAttempts <= 0;
+    if (isUnlimited || this.reconnectAttempts < this.maxReconnectAttempts) {
       this.reconnectAttempts++;
       const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 30000);
       
       console.log(`ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¾ Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts})`);
       
-      setTimeout(() => {
+      this.reconnectTimer = setTimeout(() => {
+        this.reconnectTimer = null;
         this.connect();
       }, delay);
     } else {
-      console.error('ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬Â¦ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ Max reconnection attempts reached');
+      const fallbackDelay = 60 * 1000;
+      console.error(`[ws] Max reconnect attempts reached (${this.maxReconnectAttempts}). Retrying every ${fallbackDelay / 1000}s`);
+      this.reconnectTimer = setTimeout(() => {
+        this.reconnectTimer = null;
+        this.connect();
+      }, fallbackDelay);
     }
   }
 
