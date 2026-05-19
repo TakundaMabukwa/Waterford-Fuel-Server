@@ -311,12 +311,14 @@ class EnergyRiteWebSocketClient {
 
     const fuelProbe1Level = this.parseNumericFuelValue(vehicleData.fuel_probe_1_level);
     const fuelProbe1Percentage = this.parseNumericFuelValue(vehicleData.fuel_probe_1_level_percentage);
-    const fuelProbe1Volume = this.parseNumericFuelValue(vehicleData.fuel_probe_1_volume_in_tank);
+    const fuelProbe1RawVolume = this.parseNumericFuelValue(vehicleData.fuel_probe_1_volume_in_tank);
     const fuelProbe1Temperature = this.parseNumericFuelValue(vehicleData.fuel_probe_1_temperature);
     const fuelProbe2Level = this.parseNumericFuelValue(vehicleData.fuel_probe_2_level);
     const fuelProbe2Percentage = this.parseNumericFuelValue(vehicleData.fuel_probe_2_level_percentage);
-    const fuelProbe2Volume = this.parseNumericFuelValue(vehicleData.fuel_probe_2_volume_in_tank);
+    const fuelProbe2RawVolume = this.parseNumericFuelValue(vehicleData.fuel_probe_2_volume_in_tank);
     const fuelProbe2Temperature = this.parseNumericFuelValue(vehicleData.fuel_probe_2_temperature);
+    const fuelProbe1Volume = this.resolveFuelProbeVolume(fuelProbe1RawVolume, fuelProbe1Level);
+    const fuelProbe2Volume = this.resolveFuelProbeVolume(fuelProbe2RawVolume, fuelProbe2Level);
     const percentageValues = [];
     const temperatureValues = [];
 
@@ -349,6 +351,20 @@ class EnergyRiteWebSocketClient {
   parseNumericFuelValue(value) {
     const parsed = parseFloat(value);
     return Number.isFinite(parsed) ? parsed : 0;
+  }
+
+  resolveFuelProbeVolume(volumeValue, levelValue = 0) {
+    const parsedVolume = this.parseNumericFuelValue(volumeValue);
+    if (parsedVolume > 0) {
+      return parsedVolume;
+    }
+
+    const parsedLevel = this.parseNumericFuelValue(levelValue);
+    if (parsedLevel > 0) {
+      return parsedLevel;
+    }
+
+    return parsedVolume;
   }
 
   hasNumericFuelValue(value) {
@@ -419,10 +435,20 @@ class EnergyRiteWebSocketClient {
       return null;
     }
 
-    const fuelProbe1Volume = this.parseNumericFuelValue(source.fuel_probe_1_volume_in_tank ?? source.fuel_volume);
-    const fuelProbe2Volume = this.parseNumericFuelValue(source.fuel_probe_2_volume_in_tank);
+    const fuelProbe1Level = this.parseNumericFuelValue(source.fuel_probe_1_level ?? source.fuel_level);
+    const fuelProbe2Level = this.parseNumericFuelValue(source.fuel_probe_2_level ?? source.fuel_level_probe_2);
+    const fuelProbe1Volume = this.resolveFuelProbeVolume(
+      source.fuel_probe_1_volume_in_tank ?? source.fuel_volume,
+      fuelProbe1Level
+    );
+    const fuelProbe2Volume = this.resolveFuelProbeVolume(source.fuel_probe_2_volume_in_tank, fuelProbe2Level);
     const fuelProbe1Percentage = this.parseNumericFuelValue(source.fuel_probe_1_level_percentage ?? source.fuel_percentage);
     const fuelProbe2Percentage = this.parseNumericFuelValue(source.fuel_probe_2_level_percentage);
+    const explicitCombinedFuel = this.parseNumericFuelValue(source.combined_fuel_volume_in_tank ?? source.fuel_volume);
+    const derivedCombinedFuel = fuelProbe1Volume + fuelProbe2Volume;
+    const combinedFuel = explicitCombinedFuel > 0
+      ? explicitCombinedFuel
+      : (derivedCombinedFuel > 0 ? derivedCombinedFuel : explicitCombinedFuel);
     const percentageValues = [];
     if (this.hasNumericFuelValue(source.fuel_probe_1_level_percentage ?? source.fuel_percentage)) percentageValues.push(fuelProbe1Percentage);
     if (this.hasNumericFuelValue(source.fuel_probe_2_level_percentage)) percentageValues.push(fuelProbe2Percentage);
@@ -438,7 +464,7 @@ class EnergyRiteWebSocketClient {
       fuel_probe_1_level_percentage: fuelProbe1Percentage,
       fuel_probe_2_volume_in_tank: fuelProbe2Volume,
       fuel_probe_2_level_percentage: fuelProbe2Percentage,
-      combined_fuel_volume_in_tank: fuelProbe1Volume + fuelProbe2Volume,
+      combined_fuel_volume_in_tank: combinedFuel,
       combined_fuel_percentage: percentageValues.length > 0
         ? percentageValues.reduce((sum, value) => sum + value, 0) / percentageValues.length
         : 0,
@@ -452,15 +478,27 @@ class EnergyRiteWebSocketClient {
       return {};
     }
 
-    const fuelProbe1 = this.parseNumericFuelValue(fuelData.fuel_probe_1_volume_in_tank);
-    const fuelProbe2 = this.parseNumericFuelValue(fuelData.fuel_probe_2_volume_in_tank);
+    const fuelProbe1 = this.resolveFuelProbeVolume(
+      fuelData.fuel_probe_1_volume_in_tank,
+      fuelData.fuel_probe_1_level
+    );
+    const fuelProbe2 = this.resolveFuelProbeVolume(
+      fuelData.fuel_probe_2_volume_in_tank,
+      fuelData.fuel_probe_2_level
+    );
     const percentageProbe1 = this.parseNumericFuelValue(fuelData.fuel_probe_1_level_percentage);
     const percentageProbe2 = this.parseNumericFuelValue(fuelData.fuel_probe_2_level_percentage);
-    const combinedFuel = this.hasFuelValue(fuelData.combined_fuel_volume_in_tank)
+    const explicitCombinedFuel = this.hasFuelValue(fuelData.combined_fuel_volume_in_tank)
       ? this.parseNumericFuelValue(fuelData.combined_fuel_volume_in_tank)
+      : null;
+    const combinedFromProbes = fuelProbe1 + fuelProbe2;
+    const combinedFuel = explicitCombinedFuel !== null && explicitCombinedFuel > 0
+      ? explicitCombinedFuel
+      : combinedFromProbes > 0
+        ? combinedFromProbes
       : this.hasFuelValue(fuelData.combined_fuel_level)
         ? this.parseNumericFuelValue(fuelData.combined_fuel_level)
-      : fuelProbe1 + fuelProbe2;
+      : explicitCombinedFuel ?? 0;
     const percentageValues = [];
 
     if (this.hasNumericFuelValue(fuelData.fuel_probe_1_level_percentage)) percentageValues.push(percentageProbe1);
@@ -642,6 +680,38 @@ class EnergyRiteWebSocketClient {
       lowest: this.decorateEventFuelSnapshot(lowest, targetLocTime, 'before', `postgres_last${count}_lowest`),
       highest: this.decorateEventFuelSnapshot(highest, targetLocTime, 'before', `postgres_last${count}_highest`)
     };
+  }
+
+  async findLatestValidFuelFromLastMessages(plate, targetLocTime, count = 10) {
+    const targetTimestamp = new Date(this.convertLocTime(targetLocTime)).getTime();
+    const beforeTimeIso = new Date(targetTimestamp + 1).toISOString();
+    const messages = await postgresMessageStore.getRecentFuelMessages(plate, count, { beforeTimeIso });
+
+    for (const entry of messages) {
+      const snapshot = this.buildFuelSnapshot(entry, entry.locTime, entry.timestamp);
+      if (!snapshot) continue;
+
+      const combinedFuel = this.parseNumericFuelValue(snapshot.combined_fuel_volume_in_tank);
+      const probe1Fuel = this.parseNumericFuelValue(snapshot.fuel_probe_1_volume_in_tank);
+      const probe2Fuel = this.parseNumericFuelValue(snapshot.fuel_probe_2_volume_in_tank);
+      const hasSignal = combinedFuel > 0 || probe1Fuel > 0 || probe2Fuel > 0;
+      if (!hasSignal) continue;
+
+      const decorated = this.decorateEventFuelSnapshot(
+        snapshot,
+        targetLocTime,
+        'before',
+        `postgres_last${count}_latest_valid`
+      );
+      console.log(
+        `[capture] Using last-${count} LATEST VALID BEFORE ${plate}: ` +
+        `${decorated.combined_fuel_volume_in_tank}L ` +
+        `(${(decorated.diffMs / 1000).toFixed(0)}s before, source: ${decorated.source})`
+      );
+      return decorated;
+    }
+
+    return null;
   }
 
   async findLowestFuelFromLastMessages(plate, targetLocTime, count = 10) {
@@ -1819,8 +1889,16 @@ class EnergyRiteWebSocketClient {
   normalizeFuelHistoryEntry(entry) {
     if (!entry) return null;
 
-    const probe1Volume = this.parseNumericFuelValue(entry.fuel_probe_1_volume_in_tank ?? entry.fuel_volume_probe_1 ?? entry.fuel_volume);
-    const probe2Volume = this.parseNumericFuelValue(entry.fuel_probe_2_volume_in_tank ?? entry.fuel_volume_probe_2);
+    const probe1Level = this.parseNumericFuelValue(entry.fuel_probe_1_level ?? entry.fuel_level);
+    const probe2Level = this.parseNumericFuelValue(entry.fuel_probe_2_level ?? entry.fuel_level_probe_2);
+    const probe1Volume = this.resolveFuelProbeVolume(
+      entry.fuel_probe_1_volume_in_tank ?? entry.fuel_volume_probe_1 ?? entry.fuel_volume,
+      probe1Level
+    );
+    const probe2Volume = this.resolveFuelProbeVolume(
+      entry.fuel_probe_2_volume_in_tank ?? entry.fuel_volume_probe_2,
+      probe2Level
+    );
     const probe1Percentage = this.parseNumericFuelValue(entry.fuel_probe_1_level_percentage ?? entry.fuel_percentage_probe_1 ?? entry.fuel_percentage);
     const probe2Percentage = this.parseNumericFuelValue(entry.fuel_probe_2_level_percentage ?? entry.fuel_percentage_probe_2);
     const locTime = entry.locTime ?? entry.loc_time;
@@ -1834,9 +1912,15 @@ class EnergyRiteWebSocketClient {
     if (this.hasFuelValue(entry.fuel_probe_1_level_percentage ?? entry.fuel_percentage_probe_1 ?? entry.fuel_percentage)) percentageValues.push(probe1Percentage);
     if (this.hasFuelValue(entry.fuel_probe_2_level_percentage ?? entry.fuel_percentage_probe_2)) percentageValues.push(probe2Percentage);
 
-    const combinedFuel = this.hasFuelValue(entry.combined_fuel_volume_in_tank ?? entry.fuel_volume)
+    const explicitCombinedFuel = this.hasFuelValue(entry.combined_fuel_volume_in_tank ?? entry.fuel_volume)
       ? this.parseNumericFuelValue(entry.combined_fuel_volume_in_tank ?? entry.fuel_volume)
-      : probe1Volume + probe2Volume;
+      : null;
+    const combinedFromProbes = probe1Volume + probe2Volume;
+    const combinedFuel = explicitCombinedFuel !== null && explicitCombinedFuel > 0
+      ? explicitCombinedFuel
+      : combinedFromProbes > 0
+        ? combinedFromProbes
+        : explicitCombinedFuel ?? 0;
 
     const combinedPercentage = this.hasFuelValue(entry.combined_fuel_percentage ?? entry.fuel_percentage)
       ? this.parseNumericFuelValue(entry.combined_fuel_percentage ?? entry.fuel_percentage)
@@ -1992,6 +2076,120 @@ class EnergyRiteWebSocketClient {
     return stabilized;
   }
 
+  async captureEngineOnFuelSnapshot(plate, statusLocTime) {
+    const latestValidBefore = await this.findLatestValidFuelFromLastMessages(plate, statusLocTime, 10);
+    if (latestValidBefore) {
+      return latestValidBefore;
+    }
+
+    const stableBefore = await this.findStabilizedFuelBefore(plate, statusLocTime, FUEL_STABILITY_CONFIG.engineOnLookbackMs);
+    if (stableBefore && this.parseNumericFuelValue(stableBefore.combined_fuel_volume_in_tank) > 0) {
+      const decorated = this.decorateEventFuelSnapshot(
+        stableBefore,
+        statusLocTime,
+        'before',
+        'stable_before_window'
+      );
+      const seconds = Number.isFinite(decorated?.diffMs)
+        ? (decorated.diffMs / 1000).toFixed(0)
+        : 'n/a';
+      console.log(
+        `[capture] ENGINE ON using stabilized BEFORE ${plate}: ${decorated.combined_fuel_volume_in_tank}L ` +
+        `(${seconds}s before)`
+      );
+      return decorated;
+    }
+
+    const fallback = await this.findLowestFuelFromLastMessages(plate, statusLocTime, 10);
+    if (!fallback) {
+      return null;
+    }
+
+    if (
+      Number.isFinite(fallback.diffMs) &&
+      fallback.diffMs > FUEL_STABILITY_CONFIG.engineOnFallbackMs
+    ) {
+      console.log(
+        `[capture] Ignoring ENGINE ON fallback for ${plate}: ` +
+        `${(fallback.diffMs / 1000).toFixed(0)}s before exceeds ${FUEL_STABILITY_CONFIG.engineOnFallbackMs / 1000}s`
+      );
+      return null;
+    }
+
+    return fallback;
+  }
+
+  async captureEngineOffFuelSnapshot(plate, statusLocTime) {
+    const latestValidBefore = await this.findLatestValidFuelFromLastMessages(plate, statusLocTime, 10);
+    if (latestValidBefore) {
+      return latestValidBefore;
+    }
+
+    const confirmedAfter = await this.findConfirmedStableFuelAfter(
+      plate,
+      statusLocTime,
+      FUEL_STABILITY_CONFIG.engineOffSettleDelayMs,
+      FUEL_STABILITY_CONFIG.engineOffWindowMs
+    );
+    if (confirmedAfter && this.parseNumericFuelValue(confirmedAfter.combined_fuel_volume_in_tank) > 0) {
+      const decorated = this.decorateEventFuelSnapshot(
+        confirmedAfter,
+        statusLocTime,
+        'after',
+        'stable_after_confirmed'
+      );
+      const seconds = Number.isFinite(decorated?.diffMs)
+        ? (decorated.diffMs / 1000).toFixed(0)
+        : 'n/a';
+      console.log(
+        `[capture] ENGINE OFF using confirmed stabilized AFTER ${plate}: ${decorated.combined_fuel_volume_in_tank}L ` +
+        `(${seconds}s after)`
+      );
+      return decorated;
+    }
+
+    const stabilizedAfter = await this.findStabilizedFuelAfter(
+      plate,
+      statusLocTime,
+      FUEL_STABILITY_CONFIG.engineOffSettleDelayMs,
+      FUEL_STABILITY_CONFIG.engineOffWindowMs
+    );
+    if (stabilizedAfter && this.parseNumericFuelValue(stabilizedAfter.combined_fuel_volume_in_tank) > 0) {
+      const decorated = this.decorateEventFuelSnapshot(
+        stabilizedAfter,
+        statusLocTime,
+        'after',
+        'stable_after_window'
+      );
+      const seconds = Number.isFinite(decorated?.diffMs)
+        ? (decorated.diffMs / 1000).toFixed(0)
+        : 'n/a';
+      console.log(
+        `[capture] ENGINE OFF using stabilized AFTER ${plate}: ${decorated.combined_fuel_volume_in_tank}L ` +
+        `(${seconds}s after)`
+      );
+      return decorated;
+    }
+
+    const fallback = await this.findSessionClosingFuelFromLastMessages(plate, statusLocTime, 10);
+    if (!fallback) {
+      return null;
+    }
+
+    if (
+      Number.isFinite(fallback.diffMs) &&
+      fallback.diffMs > FUEL_STABILITY_CONFIG.engineOffWindowMs
+    ) {
+      console.log(
+        `[capture] Ignoring ENGINE OFF fallback for ${plate}: ` +
+        `${(fallback.diffMs / 1000).toFixed(0)}s before exceeds ${FUEL_STABILITY_CONFIG.engineOffWindowMs / 1000}s`
+      );
+      return null;
+    }
+
+    return fallback;
+  }
+
   async handleSessionChange(plate, engineStatus, wsMessage = null) {
     try {
       const currentTime = this.convertLocTime(wsMessage?.LocTime);
@@ -2013,7 +2211,7 @@ class EnergyRiteWebSocketClient {
           .limit(1);
           
         if (!existing || existing.length === 0) {
-          const openingFuel = await this.findLowestFuelFromLastMessages(plate, wsMessage.LocTime, 10);
+          const openingFuel = await this.captureEngineOnFuelSnapshot(plate, wsMessage.LocTime);
 
           if (openingFuel) {
             const captureDetails = this.buildCaptureDetails(openingFuel, 'before');
@@ -2051,7 +2249,7 @@ class EnergyRiteWebSocketClient {
           
         if (sessions && Array.isArray(sessions) && sessions.length > 0) {
           const session = sessions[0];
-          const closingFuel = await this.findSessionClosingFuelFromLastMessages(plate, wsMessage.LocTime, 10);
+          const closingFuel = await this.captureEngineOffFuelSnapshot(plate, wsMessage.LocTime);
 
           if (closingFuel) {
             const captureDetails = this.buildCaptureDetails(closingFuel, 'after');
@@ -2244,9 +2442,9 @@ class EnergyRiteWebSocketClient {
       if (!this.pendingClosures.has(plate)) return;
       
       const pending = this.pendingClosures.get(plate);
-      const closestFuel = await this.findSessionClosingFuelFromLastMessages(plate, pending.statusLocTime, 10);
+      const closestFuel = await this.captureEngineOffFuelSnapshot(plate, pending.statusLocTime);
       if (!closestFuel) {
-        console.log(`[session] Waiting for last-10 history to include valid ENGINE OFF fuel for ${plate}`);
+        console.log(`[session] Waiting for stabilized ENGINE OFF fuel for ${plate}`);
         return;
       }
       
@@ -2273,10 +2471,10 @@ class EnergyRiteWebSocketClient {
       if (!this.pendingFuelUpdates.has(plate)) return;
       
       const pending = this.pendingFuelUpdates.get(plate);
-      const closestFuel = await this.findLowestFuelFromLastMessages(plate, pending.statusLocTime, 10);
+      const closestFuel = await this.captureEngineOnFuelSnapshot(plate, pending.statusLocTime);
       
       if (!closestFuel) {
-        console.log(`[session] Waiting for last-10 history to include valid ENGINE ON fuel for ${plate}`);
+        console.log(`[session] Waiting for stable/recent ENGINE ON fuel for ${plate}`);
         return;
       }
       
