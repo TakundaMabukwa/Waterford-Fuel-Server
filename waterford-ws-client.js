@@ -82,18 +82,28 @@ const createClient = (wsUrl) => {
     return row;
   };
 
-  const logStatusEvents = async (msg) => {
+  const logStatusEvents = async (msg, decoded) => {
     const status = (msg.status || '').toUpperCase();
     if (!status) return;
 
     const plate = msg.plate;
     const time = msg.loc_time;
+    const currentFuel1 = decoded?.tank1?.volume ?? null;
+    const currentPct1 = decoded?.tank1?.percentage ?? null;
+    const currentFuel2 = decoded?.tank2?.volume ?? null;
+    const currentPct2 = decoded?.tank2?.percentage ?? null;
 
-    if (status.includes('ENGINE ON') || status.includes('IGNITION ON') || status.includes('PTO ON')) {
+    if (status.includes('ENGINE ON') || status.includes('IGNITION ON')) {
       console.log(`[event] ENGINE ON: ${plate} at ${time}`);
 
       const fuel = await db.getLowestFuelBefore(plate, time);
       const sessionDate = time.split(' ')[0];
+
+      // Use current message fuel if available, otherwise fall back to query
+      const openingFuel1 = currentFuel1 ?? fuel?.fuel_probe_1_volume_in_tank ?? null;
+      const openingPct1 = currentPct1 ?? fuel?.fuel_probe_1_level_percentage ?? null;
+      const openingFuel2 = currentFuel2 ?? fuel?.fuel_probe_2_volume_in_tank ?? null;
+      const openingPct2 = currentPct2 ?? fuel?.fuel_probe_2_level_percentage ?? null;
 
       const { data, error } = await supabase
         .from('energy_rite_operating_sessions')
@@ -104,10 +114,10 @@ const createClient = (wsUrl) => {
           session_date: sessionDate,
           session_start_time: time,
           session_status: 'ONGOING',
-          opening_fuel_probe_1: fuel?.fuel_probe_1_volume_in_tank ?? null,
-          opening_percentage_probe_1: fuel?.fuel_probe_1_level_percentage ?? null,
-          opening_fuel_probe_2: fuel?.fuel_probe_2_volume_in_tank ?? null,
-          opening_percentage_probe_2: fuel?.fuel_probe_2_level_percentage ?? null
+          opening_fuel_probe_1: openingFuel1,
+          opening_percentage_probe_1: openingPct1,
+          opening_fuel_probe_2: openingFuel2,
+          opening_percentage_probe_2: openingPct2
         })
         .select('id')
         .single();
@@ -115,10 +125,74 @@ const createClient = (wsUrl) => {
       if (error) {
         console.error(`[session] INSERT ERROR: ${plate}`, error.message);
       } else {
-        console.log(`[session] OPEN: ${plate} session #${data.id} opening_fuel_1=${fuel?.fuel_probe_1_volume_in_tank ?? 'N/A'}`);
+        console.log(`[session] OPEN: ${plate} session #${data.id} opening_fuel_1=${openingFuel1 ?? 'N/A'}`);
       }
 
-    } else if (status.includes('ENGINE OFF') || status.includes('IGNITION OFF') || status.includes('PTO OFF')) {
+      // Fuel fill detection: check if a fill happened between last engine off and this engine on
+      try {
+        const lastEngineOff = await db.getLastEngineEventBefore(plate, time);
+        if (lastEngineOff) {
+          const fillEvent = await db.getFuelFillBetween(plate, lastEngineOff.loc_time, time);
+          if (fillEvent) {
+            const fuelBefore = lastEngineOff.fuel_probe_1_volume_in_tank;
+            const fuelAfter = openingFuel1;
+            const pctBefore = lastEngineOff.fuel_probe_1_level_percentage;
+            const pctAfter = openingPct1;
+
+            if (fuelBefore != null && fuelAfter != null && fuelAfter > fuelBefore) {
+              const fillAmount = fuelAfter - fuelBefore;
+              const fillPct = (pctAfter != null && pctBefore != null) ? pctAfter - pctBefore : null;
+
+              console.log(`[fill] DETECTED: ${plate} fill=${fillAmount.toFixed(1)}L (${fuelBefore}→${fuelAfter})`);
+
+              const { error: fillError } = await supabase
+                .from('energy_rite_fuel_fills')
+                .insert({
+                  plate,
+                  fill_date: sessionDate,
+                  fuel_before: fuelBefore,
+                  fuel_after: fuelAfter,
+                  fill_amount: fillAmount,
+                  fill_percentage: fillPct,
+                  detection_method: 'ENGINE_ON_COMPARISON',
+                  status: 'COMPLETED',
+                  fill_data: JSON.stringify({
+                    engine_off_time: lastEngineOff.loc_time,
+                    engine_on_time: time,
+                    fill_event_time: fillEvent.loc_time,
+                    engine_off_fuel: fuelBefore,
+                    engine_on_fuel: fuelAfter
+                  })
+                });
+
+              if (fillError) {
+                console.error(`[fill] INSERT ERROR: ${plate}`, fillError.message);
+              } else {
+                console.log(`[fill] INSERTED: ${plate} ${fillAmount.toFixed(1)}L`);
+              }
+
+              if (data?.id) {
+                const currentCount = data.fill_events || 0;
+                const { error: updateErr } = await supabase
+                  .from('energy_rite_operating_sessions')
+                  .update({
+                    fill_events: currentCount + 1,
+                    fill_amount_during_session: (data.fill_amount_during_session || 0) + fillAmount
+                  })
+                  .eq('id', data.id);
+
+                if (updateErr) {
+                  console.error(`[fill] SESSION UPDATE ERROR: ${plate}`, updateErr.message);
+                }
+              }
+            }
+          }
+        }
+      } catch (err) {
+        console.error(`[fill] Error: ${err.message}`);
+      }
+
+    } else if (status.includes('ENGINE OFF') || status.includes('IGNITION OFF')) {
       console.log(`[event] ENGINE OFF: ${plate} at ${time}`);
 
       const { data: openSession } = await supabase
@@ -135,16 +209,25 @@ const createClient = (wsUrl) => {
         return;
       }
 
-      const fuel = await db.getLowestFuelAfter(plate, time);
+      // Use current message fuel, fall back to query if ENGINE OFF has no fuel data
+      let closingFuel1 = currentFuel1;
+      let closingPct1 = currentPct1;
+      let closingFuel2 = currentFuel2;
+      let closingPct2 = currentPct2;
+
+      if (closingFuel1 == null) {
+        const fallback = await db.getLowestFuelAfter(plate, time);
+        if (fallback) {
+          closingFuel1 = fallback.fuel_probe_1_volume_in_tank;
+          closingPct1 = fallback.fuel_probe_1_level_percentage;
+          closingFuel2 = fallback.fuel_probe_2_volume_in_tank;
+          closingPct2 = fallback.fuel_probe_2_level_percentage;
+        }
+      }
 
       const startTime = new Date(openSession.session_start_time);
       const endTime = new Date(time);
       const operatingHours = Math.max(0, (endTime - startTime) / (1000 * 60 * 60));
-
-      const closingFuel1 = fuel?.fuel_probe_1_volume_in_tank ?? null;
-      const closingPct1 = fuel?.fuel_probe_1_level_percentage ?? null;
-      const closingFuel2 = fuel?.fuel_probe_2_volume_in_tank ?? null;
-      const closingPct2 = fuel?.fuel_probe_2_level_percentage ?? null;
 
       const totalUsage = (openSession.opening_fuel_probe_1 != null && closingFuel1 != null)
         ? openSession.opening_fuel_probe_1 - closingFuel1
@@ -210,17 +293,26 @@ const createClient = (wsUrl) => {
       console.log(`[ws] ${messageCount} messages processed (latest: ${msg.plate})`);
     }
 
+    const row = buildRow(msg, decoded);
+
     try {
-      await logStatusEvents(msg);
+      await db.insertHistory(row);
+    } catch (err) {
+      console.error(`[db] INSERT HISTORY ERROR: ${msg.plate}`, err.message);
+    }
+
+    try {
+      await logStatusEvents(msg, decoded);
     } catch (err) {
       console.error(`[session] Error: ${err.message}`);
     }
 
-    const row = buildRow(msg, decoded);
-    await db.insertHistory(row);
-
     if (messageType === 405 && hasFuelData(decoded)) {
-      await db.upsertLatest(row);
+      try {
+        await db.upsertLatest(row);
+      } catch (err) {
+        console.error(`[db] UPSERT LATEST ERROR: ${msg.plate}`, err.message);
+      }
     }
   };
 

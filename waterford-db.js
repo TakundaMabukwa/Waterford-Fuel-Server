@@ -258,6 +258,35 @@ const getLowestFuelAfter = async (plate, locTime) => {
   );
 };
 
+const getLastEngineEventBefore = async (plate, locTime) => {
+  const { rows } = await query(
+    `SELECT status, loc_time, fuel_probe_1_volume_in_tank, fuel_probe_1_level_percentage
+     FROM vehicle_history
+     WHERE plate = $1 AND loc_time < $2
+       AND (
+         UPPER(status) LIKE '%ENGINE OFF%'
+         OR UPPER(status) LIKE '%IGNITION OFF%'
+       )
+     ORDER BY loc_time DESC
+     LIMIT 1`,
+    [plate, locTime]
+  );
+  return rows[0] || null;
+};
+
+const getFuelFillBetween = async (plate, startTime, endTime) => {
+  const { rows } = await query(
+    `SELECT status, loc_time
+     FROM vehicle_history
+     WHERE plate = $1 AND loc_time > $2 AND loc_time < $3
+       AND UPPER(status) LIKE '%FUEL FILL%'
+     ORDER BY loc_time ASC
+     LIMIT 1`,
+    [plate, startTime, endTime]
+  );
+  return rows[0] || null;
+};
+
 const init = async () => {
   if (initialized) return;
   await waitForDatabase();
@@ -277,5 +306,5 @@ const close = async () => {
 
 module.exports = {
   init, close, query, isKnownVehicle, getCostCode, insertHistory, upsertLatest,
-  getLowestFuelBefore, getLowestFuelAfter
+  getLowestFuelBefore, getLowestFuelAfter, getLastEngineEventBefore, getFuelFillBetween
 };
