@@ -11,6 +11,8 @@ services:
       - PGPASSWORD=vik8989
       - WEBSOCKET_URL=ws://209.38.217.58:8093
       - PORT=4000
+      - SUPABASE_URL=https://hziksqggnmjftimwgyyk.supabase.co
+      - SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imh6aWtzcWdnbm1qZnRpbXdneXlrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njk4NDc5NDQsImV4cCI6MjA4NTQyMzk0NH0.4_n8TXZ1lKYer2srmtexe1En1KfEnehXmykvsjqGVBY
     depends_on:
       postgres:
         condition: service_healthy

@@ -161,6 +161,11 @@ const createTables = async () => {
       ON vehicle_history (plate, created_at DESC)
   `);
 
+  await query(`
+    CREATE INDEX IF NOT EXISTS idx_vehicle_history_plate_loc_time
+      ON vehicle_history (plate, loc_time)
+  `);
+
   console.log('[db] Tables ready');
 };
 
@@ -216,6 +221,43 @@ const upsertLatest = async (row) => {
   await query(sql, HISTORY_COLUMNS.map(c => row[c]));
 };
 
+const FUEL_PROBE_COLUMNS = [
+  'fuel_probe_1_level', 'fuel_probe_1_volume_in_tank',
+  'fuel_probe_1_temperature', 'fuel_probe_1_level_percentage',
+  'fuel_probe_2_level', 'fuel_probe_2_volume_in_tank',
+  'fuel_probe_2_temperature', 'fuel_probe_2_level_percentage'
+];
+
+const getLowestFuelBefore = async (plate, locTime) => {
+  const { rows } = await query(
+    `SELECT ${FUEL_PROBE_COLUMNS.join(', ')}
+     FROM vehicle_history
+     WHERE plate = $1 AND loc_time < $2
+     ORDER BY loc_time DESC
+     LIMIT 3`,
+    [plate, locTime]
+  );
+  if (!rows.length) return null;
+  return rows.reduce((min, r) =>
+    (r.fuel_probe_1_volume_in_tank ?? Infinity) < (min.fuel_probe_1_volume_in_tank ?? Infinity) ? r : min
+  );
+};
+
+const getLowestFuelAfter = async (plate, locTime) => {
+  const { rows } = await query(
+    `SELECT ${FUEL_PROBE_COLUMNS.join(', ')}
+     FROM vehicle_history
+     WHERE plate = $1 AND loc_time >= $2
+     ORDER BY loc_time ASC
+     LIMIT 3`,
+    [plate, locTime]
+  );
+  if (!rows.length) return null;
+  return rows.reduce((min, r) =>
+    (r.fuel_probe_1_volume_in_tank ?? Infinity) < (min.fuel_probe_1_volume_in_tank ?? Infinity) ? r : min
+  );
+};
+
 const init = async () => {
   if (initialized) return;
   await waitForDatabase();
@@ -233,4 +275,7 @@ const close = async () => {
   }
 };
 
-module.exports = { init, close, query, isKnownVehicle, getCostCode, insertHistory, upsertLatest };
+module.exports = {
+  init, close, query, isKnownVehicle, getCostCode, insertHistory, upsertLatest,
+  getLowestFuelBefore, getLowestFuelAfter
+};

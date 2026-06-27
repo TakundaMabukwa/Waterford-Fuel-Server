@@ -1,6 +1,7 @@
 const WebSocket = require('ws');
 const { decodeFuelData, hasFuelData } = require('./waterford-fuel-decoder');
 const db = require('./waterford-db');
+const { supabase } = require('./supabase-client');
 
 const createClient = (wsUrl) => {
   let ws = null;
@@ -81,7 +82,7 @@ const createClient = (wsUrl) => {
     return row;
   };
 
-  const logStatusEvents = (msg) => {
+  const logStatusEvents = async (msg) => {
     const status = (msg.status || '').toUpperCase();
     if (!status) return;
 
@@ -90,8 +91,102 @@ const createClient = (wsUrl) => {
 
     if (status.includes('ENGINE ON') || status.includes('IGNITION ON') || status.includes('PTO ON')) {
       console.log(`[event] ENGINE ON: ${plate} at ${time}`);
+
+      const fuel = await db.getLowestFuelBefore(plate, time);
+      const sessionDate = time.split(' ')[0];
+
+      const { data, error } = await supabase
+        .from('energy_rite_operating_sessions')
+        .insert({
+          branch: plate,
+          company: 'KFC',
+          cost_code: db.getCostCode(plate),
+          session_date: sessionDate,
+          session_start_time: time,
+          session_status: 'ONGOING',
+          opening_fuel_probe_1: fuel?.fuel_probe_1_volume_in_tank ?? null,
+          opening_percentage_probe_1: fuel?.fuel_probe_1_level_percentage ?? null,
+          opening_fuel_probe_2: fuel?.fuel_probe_2_volume_in_tank ?? null,
+          opening_percentage_probe_2: fuel?.fuel_probe_2_level_percentage ?? null
+        })
+        .select('id')
+        .single();
+
+      if (error) {
+        console.error(`[session] INSERT ERROR: ${plate}`, error.message);
+      } else {
+        console.log(`[session] OPEN: ${plate} session #${data.id} opening_fuel_1=${fuel?.fuel_probe_1_volume_in_tank ?? 'N/A'}`);
+      }
+
     } else if (status.includes('ENGINE OFF') || status.includes('IGNITION OFF') || status.includes('PTO OFF')) {
       console.log(`[event] ENGINE OFF: ${plate} at ${time}`);
+
+      const { data: openSession } = await supabase
+        .from('energy_rite_operating_sessions')
+        .select('id, session_start_time, opening_fuel_probe_1, opening_fuel_probe_2')
+        .eq('branch', plate)
+        .eq('session_status', 'ONGOING')
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .single();
+
+      if (!openSession) {
+        console.log(`[session] NO OPEN SESSION: ${plate}`);
+        return;
+      }
+
+      const fuel = await db.getLowestFuelAfter(plate, time);
+
+      const startTime = new Date(openSession.session_start_time);
+      const endTime = new Date(time);
+      const operatingHours = Math.max(0, (endTime - startTime) / (1000 * 60 * 60));
+
+      const closingFuel1 = fuel?.fuel_probe_1_volume_in_tank ?? null;
+      const closingPct1 = fuel?.fuel_probe_1_level_percentage ?? null;
+      const closingFuel2 = fuel?.fuel_probe_2_volume_in_tank ?? null;
+      const closingPct2 = fuel?.fuel_probe_2_level_percentage ?? null;
+
+      const totalUsage = (openSession.opening_fuel_probe_1 != null && closingFuel1 != null)
+        ? openSession.opening_fuel_probe_1 - closingFuel1
+        : null;
+
+      const literUsagePerHour = (totalUsage != null && operatingHours > 0)
+        ? totalUsage / operatingHours
+        : null;
+
+      const costPerLiter = 20.00;
+      const costForUsage = (totalUsage != null) ? totalUsage * costPerLiter : null;
+
+      const durationH = operatingHours.toFixed(2);
+      const openingL = openSession.opening_fuel_probe_1 ?? 'N/A';
+      const closingL = closingFuel1 ?? 'N/A';
+      const usedL = totalUsage != null ? totalUsage.toFixed(1) : 'N/A';
+      const notes = `Engine stopped. Duration: ${durationH}h, Opening: ${openingL}L, Closing: ${closingL}L, Used: ${usedL}L`;
+
+      const { error } = await supabase
+        .from('energy_rite_operating_sessions')
+        .update({
+          session_end_time: time,
+          session_status: 'COMPLETED',
+          closing_fuel_probe_1: closingFuel1,
+          closing_percentage_probe_1: closingPct1,
+          closing_fuel_probe_2: closingFuel2,
+          closing_percentage_probe_2: closingPct2,
+          operating_hours: operatingHours,
+          total_usage: totalUsage,
+          liter_usage_per_hour: literUsagePerHour,
+          cost_per_liter: costPerLiter,
+          cost_for_usage: costForUsage,
+          notes
+        })
+        .eq('id', openSession.id);
+
+      if (error) {
+        console.error(`[session] UPDATE ERROR: ${plate}`, error.message);
+      } else {
+        console.log(`[session] CLOSE: ${plate} session #${openSession.id} used=${usedL}L hours=${durationH}h`);
+      }
+
     } else if (status.includes('POSSIBLE FUEL FILL')) {
       console.log(`[event] FUEL FILL: ${plate} at ${time}`);
     } else if (status.includes('POSSIBLE FUEL THEFT')) {
@@ -115,7 +210,11 @@ const createClient = (wsUrl) => {
       console.log(`[ws] ${messageCount} messages processed (latest: ${msg.plate})`);
     }
 
-    logStatusEvents(msg);
+    try {
+      await logStatusEvents(msg);
+    } catch (err) {
+      console.error(`[session] Error: ${err.message}`);
+    }
 
     const row = buildRow(msg, decoded);
     await db.insertHistory(row);
