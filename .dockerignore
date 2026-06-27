@@ -1,0 +1,16 @@
+node_modules
+npm-debug.log
+.git
+.env
+*.err.log
+*.out.log
+*.pid
+*.db
+*.jpeg
+*.jpg
+*.png
+*.gif
+README.md
+Dockerfile
+docker-compose.yml
+.dockerignore
