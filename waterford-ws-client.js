@@ -209,14 +209,14 @@ const createClient = (wsUrl) => {
         return;
       }
 
-      // Use current message fuel, fall back to query if ENGINE OFF has no fuel data
+      // Use current message fuel, fall back to last known fuel before Engine Off
       let closingFuel1 = currentFuel1;
       let closingPct1 = currentPct1;
       let closingFuel2 = currentFuel2;
       let closingPct2 = currentPct2;
 
       if (closingFuel1 == null) {
-        const fallback = await db.getLowestFuelAfter(plate, time);
+        const fallback = await db.getLastFuelBefore(plate, time);
         if (fallback) {
           closingFuel1 = fallback.fuel_probe_1_volume_in_tank;
           closingPct1 = fallback.fuel_probe_1_level_percentage;
