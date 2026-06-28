@@ -211,8 +211,8 @@ const createClient = (wsUrl) => {
         return;
       }
 
-      // Engine Off messages have no fuel data — always use last known fuel reading
-      const lastFuel = await db.getLastFuelBefore(plate, time);
+      // Engine Off messages have no fuel data — get highest fuel closest to engine off time
+      const lastFuel = await db.getHighestFuelBefore(plate, time);
       const closingFuel1 = lastFuel?.fuel_probe_1_volume_in_tank ?? null;
       const closingPct1 = lastFuel?.fuel_probe_1_level_percentage ?? null;
       const closingFuel2 = lastFuel?.fuel_probe_2_volume_in_tank ?? null;
@@ -223,7 +223,7 @@ const createClient = (wsUrl) => {
       const operatingHours = Math.max(0, (endTime - startTime) / (1000 * 60 * 60));
 
       const totalUsage = (openSession.opening_fuel_probe_1 != null && closingFuel1 != null)
-        ? openSession.opening_fuel_probe_1 - closingFuel1
+        ? Math.max(0, openSession.opening_fuel_probe_1 - closingFuel1)
         : null;
 
       const literUsagePerHour = (totalUsage != null && operatingHours > 0)

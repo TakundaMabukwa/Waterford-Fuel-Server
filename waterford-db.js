@@ -233,6 +233,8 @@ const getLowestFuelBefore = async (plate, locTime) => {
     `SELECT ${FUEL_PROBE_COLUMNS.join(', ')}
      FROM vehicle_history
      WHERE plate = $1 AND loc_time < $2
+       AND fuel_probe_1_volume_in_tank IS NOT NULL
+       AND fuel_probe_1_volume_in_tank > 0
      ORDER BY loc_time DESC
      LIMIT 3`,
     [plate, locTime]
@@ -300,6 +302,23 @@ const getLastFuelBefore = async (plate, locTime) => {
   return rows[0] || null;
 };
 
+const getHighestFuelBefore = async (plate, locTime) => {
+  const { rows } = await query(
+    `SELECT ${FUEL_PROBE_COLUMNS.join(', ')}
+     FROM vehicle_history
+     WHERE plate = $1 AND loc_time <= $2
+       AND fuel_probe_1_volume_in_tank IS NOT NULL
+       AND fuel_probe_1_volume_in_tank > 0
+     ORDER BY loc_time DESC
+     LIMIT 5`,
+    [plate, locTime]
+  );
+  if (!rows.length) return null;
+  return rows.reduce((max, r) =>
+    (r.fuel_probe_1_volume_in_tank ?? -1) > (max.fuel_probe_1_volume_in_tank ?? -1) ? r : max
+  );
+};
+
 const init = async () => {
   if (initialized) return;
   await waitForDatabase();
@@ -319,5 +338,5 @@ const close = async () => {
 
 module.exports = {
   init, close, query, isKnownVehicle, getCostCode, insertHistory, upsertLatest,
-  getLowestFuelBefore, getLowestFuelAfter, getLastEngineEventBefore, getFuelFillBetween, getLastFuelBefore
+  getLowestFuelBefore, getLowestFuelAfter, getLastEngineEventBefore, getFuelFillBetween, getLastFuelBefore, getHighestFuelBefore
 };
