@@ -134,9 +134,11 @@ const createClient = (wsUrl) => {
         if (lastEngineOff) {
           const fillEvent = await db.getFuelFillBetween(plate, lastEngineOff.loc_time, time);
           if (fillEvent) {
-            const fuelBefore = lastEngineOff.fuel_probe_1_volume_in_tank;
+            // Get the actual fuel level at engine off time (Engine Off messages have no fuel data)
+            const fuelAtOff = await db.getLastFuelBefore(plate, lastEngineOff.loc_time);
+            const fuelBefore = fuelAtOff?.fuel_probe_1_volume_in_tank ?? null;
             const fuelAfter = openingFuel1;
-            const pctBefore = lastEngineOff.fuel_probe_1_level_percentage;
+            const pctBefore = fuelAtOff?.fuel_probe_1_level_percentage ?? null;
             const pctAfter = openingPct1;
 
             if (fuelBefore != null && fuelAfter != null && fuelAfter > fuelBefore) {
@@ -209,21 +211,12 @@ const createClient = (wsUrl) => {
         return;
       }
 
-      // Use current message fuel, fall back to last known fuel before Engine Off
-      let closingFuel1 = currentFuel1;
-      let closingPct1 = currentPct1;
-      let closingFuel2 = currentFuel2;
-      let closingPct2 = currentPct2;
-
-      if (closingFuel1 == null) {
-        const fallback = await db.getLastFuelBefore(plate, time);
-        if (fallback) {
-          closingFuel1 = fallback.fuel_probe_1_volume_in_tank;
-          closingPct1 = fallback.fuel_probe_1_level_percentage;
-          closingFuel2 = fallback.fuel_probe_2_volume_in_tank;
-          closingPct2 = fallback.fuel_probe_2_level_percentage;
-        }
-      }
+      // Engine Off messages have no fuel data — always use last known fuel reading
+      const lastFuel = await db.getLastFuelBefore(plate, time);
+      const closingFuel1 = lastFuel?.fuel_probe_1_volume_in_tank ?? null;
+      const closingPct1 = lastFuel?.fuel_probe_1_level_percentage ?? null;
+      const closingFuel2 = lastFuel?.fuel_probe_2_volume_in_tank ?? null;
+      const closingPct2 = lastFuel?.fuel_probe_2_level_percentage ?? null;
 
       const startTime = new Date(openSession.session_start_time);
       const endTime = new Date(time);
