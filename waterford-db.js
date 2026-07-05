@@ -319,6 +319,53 @@ const getHighestFuelBefore = async (plate, locTime) => {
   );
 };
 
+const getLastFuelReading = async (plate, locTime) => {
+  const { rows } = await query(
+    `SELECT ${FUEL_PROBE_COLUMNS.join(', ')}
+     FROM vehicle_history
+     WHERE plate = $1 AND loc_time <= $2
+       AND fuel_probe_1_volume_in_tank IS NOT NULL
+       AND fuel_probe_1_volume_in_tank > 0
+     ORDER BY loc_time DESC
+     LIMIT 1`,
+    [plate, locTime]
+  );
+  return rows[0] || null;
+};
+
+const getLastFuelReadingAfter = async (plate, locTime) => {
+  const { rows } = await query(
+    `SELECT ${FUEL_PROBE_COLUMNS.join(', ')}
+     FROM vehicle_history
+     WHERE plate = $1 AND loc_time > $2
+       AND fuel_probe_1_volume_in_tank IS NOT NULL
+       AND fuel_probe_1_volume_in_tank > 0
+     ORDER BY loc_time ASC
+     LIMIT 5`,
+    [plate, locTime]
+  );
+  if (!rows.length) return null;
+  return rows.reduce((max, r) =>
+    (r.fuel_probe_1_volume_in_tank ?? -1) > (max.fuel_probe_1_volume_in_tank ?? -1) ? r : max
+  );
+};
+
+const getPreviousSessionClosing = async (plate, currentTime) => {
+  const { rows } = await query(
+    `SELECT closing_fuel_probe_1, closing_percentage_probe_1,
+            closing_fuel_probe_2, closing_percentage_probe_2,
+            session_end_time
+     FROM energy_rite_operating_sessions
+     WHERE branch = $1 AND session_status = 'COMPLETED'
+       AND session_end_time < $2
+       AND closing_fuel_probe_1 IS NOT NULL
+     ORDER BY session_end_time DESC
+     LIMIT 1`,
+    [plate, currentTime]
+  );
+  return rows[0] || null;
+};
+
 const init = async () => {
   if (initialized) return;
   await waitForDatabase();
@@ -338,5 +385,7 @@ const close = async () => {
 
 module.exports = {
   init, close, query, isKnownVehicle, getCostCode, insertHistory, upsertLatest,
-  getLowestFuelBefore, getLowestFuelAfter, getLastEngineEventBefore, getFuelFillBetween, getLastFuelBefore, getHighestFuelBefore
+  getLowestFuelBefore, getLowestFuelAfter, getLastEngineEventBefore, getFuelFillBetween,
+  getLastFuelBefore, getHighestFuelBefore, getLastFuelReading, getLastFuelReadingAfter,
+  getPreviousSessionClosing
 };

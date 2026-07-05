@@ -96,14 +96,22 @@ const createClient = (wsUrl) => {
     if (status.includes('ENGINE ON') || status.includes('IGNITION ON')) {
       console.log(`[event] ENGINE ON: ${plate} at ${time}`);
 
-      const fuel = await db.getLowestFuelBefore(plate, time);
-      const sessionDate = time.split(' ')[0];
+      let openingFuel1 = currentFuel1;
+      let openingPct1 = currentPct1;
+      let openingFuel2 = currentFuel2;
+      let openingPct2 = currentPct2;
 
-      // Use current message fuel if available, otherwise fall back to query
-      const openingFuel1 = currentFuel1 ?? fuel?.fuel_probe_1_volume_in_tank ?? null;
-      const openingPct1 = currentPct1 ?? fuel?.fuel_probe_1_level_percentage ?? null;
-      const openingFuel2 = currentFuel2 ?? fuel?.fuel_probe_2_volume_in_tank ?? null;
-      const openingPct2 = currentPct2 ?? fuel?.fuel_probe_2_level_percentage ?? null;
+      if (openingFuel1 == null) {
+        const fallback = await db.getLastFuelReading(plate, time);
+        if (fallback) {
+          openingFuel1 = fallback.fuel_probe_1_volume_in_tank;
+          openingPct1 = fallback.fuel_probe_1_level_percentage;
+          openingFuel2 = fallback.fuel_probe_2_volume_in_tank;
+          openingPct2 = fallback.fuel_probe_2_level_percentage;
+        }
+      }
+
+      const sessionDate = time.split(' ')[0];
 
       const { data, error } = await supabase
         .from('energy_rite_operating_sessions')
@@ -125,67 +133,56 @@ const createClient = (wsUrl) => {
       if (error) {
         console.error(`[session] INSERT ERROR: ${plate}`, error.message);
       } else {
-        console.log(`[session] OPEN: ${plate} session #${data.id} opening_fuel_1=${openingFuel1 ?? 'N/A'}`);
+        console.log(`[session] OPEN: ${plate} session #${data.id} opening_fuel_1=${openingFuel1 ?? 'N/A'} opening_fuel_2=${openingFuel2 ?? 'N/A'}`);
       }
 
-      // Fuel fill detection: check if a fill happened between last engine off and this engine on
       try {
-        const lastEngineOff = await db.getLastEngineEventBefore(plate, time);
-        if (lastEngineOff) {
-          const fillEvent = await db.getFuelFillBetween(plate, lastEngineOff.loc_time, time);
-          if (fillEvent) {
-            // Get the actual fuel level at engine off time (Engine Off messages have no fuel data)
-            const fuelAtOff = await db.getLastFuelBefore(plate, lastEngineOff.loc_time);
-            const fuelBefore = fuelAtOff?.fuel_probe_1_volume_in_tank ?? null;
-            const fuelAfter = openingFuel1;
-            const pctBefore = fuelAtOff?.fuel_probe_1_level_percentage ?? null;
-            const pctAfter = openingPct1;
+        const prevSession = await db.getPreviousSessionClosing(plate, time);
+        if (prevSession && prevSession.closing_fuel_probe_1 != null && openingFuel1 != null) {
+          const diff = openingFuel1 - prevSession.closing_fuel_probe_1;
+          if (diff >= 10) {
+            const fillAmount = diff;
+            const pctDiff = (openingPct1 != null && prevSession.closing_percentage_probe_1 != null)
+              ? openingPct1 - prevSession.closing_percentage_probe_1 : null;
 
-            if (fuelBefore != null && fuelAfter != null && fuelAfter > fuelBefore) {
-              const fillAmount = fuelAfter - fuelBefore;
-              const fillPct = (pctAfter != null && pctBefore != null) ? pctAfter - pctBefore : null;
+            console.log(`[fill] DETECTED: ${plate} fill=${fillAmount.toFixed(1)}L (${prevSession.closing_fuel_probe_1}→${openingFuel1})`);
 
-              console.log(`[fill] DETECTED: ${plate} fill=${fillAmount.toFixed(1)}L (${fuelBefore}→${fuelAfter})`);
+            const { error: fillError } = await supabase
+              .from('energy_rite_fuel_fills')
+              .insert({
+                plate,
+                fill_date: sessionDate,
+                fuel_before: prevSession.closing_fuel_probe_1,
+                fuel_after: openingFuel1,
+                fill_amount: fillAmount,
+                fill_percentage: pctDiff,
+                detection_method: 'SESSION_COMPARISON',
+                status: 'COMPLETED',
+                fill_data: JSON.stringify({
+                  previous_session_end: prevSession.session_end_time,
+                  current_session_start: time,
+                  previous_closing_fuel: prevSession.closing_fuel_probe_1,
+                  current_opening_fuel: openingFuel1
+                })
+              });
 
-              const { error: fillError } = await supabase
-                .from('energy_rite_fuel_fills')
-                .insert({
-                  plate,
-                  fill_date: sessionDate,
-                  fuel_before: fuelBefore,
-                  fuel_after: fuelAfter,
-                  fill_amount: fillAmount,
-                  fill_percentage: fillPct,
-                  detection_method: 'ENGINE_ON_COMPARISON',
-                  status: 'COMPLETED',
-                  fill_data: JSON.stringify({
-                    engine_off_time: lastEngineOff.loc_time,
-                    engine_on_time: time,
-                    fill_event_time: fillEvent.loc_time,
-                    engine_off_fuel: fuelBefore,
-                    engine_on_fuel: fuelAfter
-                  })
-                });
+            if (fillError) {
+              console.error(`[fill] INSERT ERROR: ${plate}`, fillError.message);
+            } else {
+              console.log(`[fill] INSERTED: ${plate} ${fillAmount.toFixed(1)}L`);
+            }
 
-              if (fillError) {
-                console.error(`[fill] INSERT ERROR: ${plate}`, fillError.message);
-              } else {
-                console.log(`[fill] INSERTED: ${plate} ${fillAmount.toFixed(1)}L`);
-              }
+            if (data?.id) {
+              const { error: updateErr } = await supabase
+                .from('energy_rite_operating_sessions')
+                .update({
+                  fill_events: 1,
+                  fill_amount_during_session: fillAmount
+                })
+                .eq('id', data.id);
 
-              if (data?.id) {
-                const currentCount = data.fill_events || 0;
-                const { error: updateErr } = await supabase
-                  .from('energy_rite_operating_sessions')
-                  .update({
-                    fill_events: currentCount + 1,
-                    fill_amount_during_session: (data.fill_amount_during_session || 0) + fillAmount
-                  })
-                  .eq('id', data.id);
-
-                if (updateErr) {
-                  console.error(`[fill] SESSION UPDATE ERROR: ${plate}`, updateErr.message);
-                }
+              if (updateErr) {
+                console.error(`[fill] SESSION UPDATE ERROR: ${plate}`, updateErr.message);
               }
             }
           }
@@ -211,33 +208,39 @@ const createClient = (wsUrl) => {
         return;
       }
 
-      // Engine Off messages have no fuel data — get highest fuel closest to engine off time
-      const lastFuel = await db.getHighestFuelBefore(plate, time);
-      const closingFuel1 = lastFuel?.fuel_probe_1_volume_in_tank ?? null;
-      const closingPct1 = lastFuel?.fuel_probe_1_level_percentage ?? null;
-      const closingFuel2 = lastFuel?.fuel_probe_2_volume_in_tank ?? null;
-      const closingPct2 = lastFuel?.fuel_probe_2_level_percentage ?? null;
+      let closingFuel1 = currentFuel1;
+      let closingPct1 = currentPct1;
+      let closingFuel2 = currentFuel2;
+      let closingPct2 = currentPct2;
+
+      if (closingFuel1 == null) {
+        const lastFuel = await db.getLastFuelReading(plate, time);
+        closingFuel1 = lastFuel?.fuel_probe_1_volume_in_tank ?? null;
+        closingPct1 = lastFuel?.fuel_probe_1_level_percentage ?? null;
+        closingFuel2 = lastFuel?.fuel_probe_2_volume_in_tank ?? null;
+        closingPct2 = lastFuel?.fuel_probe_2_level_percentage ?? null;
+      }
 
       const startTime = new Date(openSession.session_start_time);
       const endTime = new Date(time);
       const operatingHours = Math.max(0, (endTime - startTime) / (1000 * 60 * 60));
 
-      const totalUsage = (openSession.opening_fuel_probe_1 != null && closingFuel1 != null)
-        ? Math.max(0, openSession.opening_fuel_probe_1 - closingFuel1)
-        : null;
+      const usage1 = (openSession.opening_fuel_probe_1 != null && closingFuel1 != null)
+        ? Math.max(0, openSession.opening_fuel_probe_1 - closingFuel1) : 0;
+      const usage2 = (openSession.opening_fuel_probe_2 != null && closingFuel2 != null)
+        ? Math.max(0, openSession.opening_fuel_probe_2 - closingFuel2) : 0;
+      const totalUsage = usage1 + usage2;
 
-      const literUsagePerHour = (totalUsage != null && operatingHours > 0)
-        ? totalUsage / operatingHours
-        : null;
+      const literUsagePerHour = (operatingHours > 0) ? totalUsage / operatingHours : null;
 
       const costPerLiter = 20.00;
-      const costForUsage = (totalUsage != null) ? totalUsage * costPerLiter : null;
+      const costForUsage = totalUsage * costPerLiter;
 
       const durationH = operatingHours.toFixed(2);
-      const openingL = openSession.opening_fuel_probe_1 ?? 'N/A';
-      const closingL = closingFuel1 ?? 'N/A';
-      const usedL = totalUsage != null ? totalUsage.toFixed(1) : 'N/A';
-      const notes = `Engine stopped. Duration: ${durationH}h, Opening: ${openingL}L, Closing: ${closingL}L, Used: ${usedL}L`;
+      const opening1 = openSession.opening_fuel_probe_1 ?? 'N/A';
+      const closing1 = closingFuel1 ?? 'N/A';
+      const usedL = totalUsage.toFixed(1);
+      const notes = `Engine stopped. Duration: ${durationH}h, Opening1: ${opening1}L, Closing1: ${closing1}L, Used: ${usedL}L (probe1: ${usage1.toFixed(1)}L, probe2: ${usage2.toFixed(1)}L)`;
 
       const { error } = await supabase
         .from('energy_rite_operating_sessions')
@@ -260,7 +263,7 @@ const createClient = (wsUrl) => {
       if (error) {
         console.error(`[session] UPDATE ERROR: ${plate}`, error.message);
       } else {
-        console.log(`[session] CLOSE: ${plate} session #${openSession.id} used=${usedL}L hours=${durationH}h`);
+        console.log(`[session] CLOSE: ${plate} session #${openSession.id} used=${usedL}L probe1=${usage1.toFixed(1)}L probe2=${usage2.toFixed(1)}L hours=${durationH}h`);
       }
 
     } else if (status.includes('POSSIBLE FUEL FILL')) {
