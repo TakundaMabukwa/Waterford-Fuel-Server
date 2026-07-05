@@ -138,51 +138,59 @@ const createClient = (wsUrl) => {
 
       try {
         const prevSession = await db.getPreviousSessionClosing(plate, time);
-        if (prevSession && prevSession.closing_fuel_probe_1 != null && openingFuel1 != null) {
-          const diff = openingFuel1 - prevSession.closing_fuel_probe_1;
-          if (diff >= 10) {
-            const fillAmount = diff;
-            const pctDiff = (openingPct1 != null && prevSession.closing_percentage_probe_1 != null)
-              ? openingPct1 - prevSession.closing_percentage_probe_1 : null;
+        if (prevSession && prevSession.session_end_time && openingFuel1 != null) {
+          const lowestBetween = await db.getLowestFuelBetween(plate, prevSession.session_end_time, time);
+          const preFillFuel = lowestBetween?.fuel_probe_1_volume_in_tank ?? prevSession.closing_fuel_probe_1;
 
-            console.log(`[fill] DETECTED: ${plate} fill=${fillAmount.toFixed(1)}L (${prevSession.closing_fuel_probe_1}→${openingFuel1})`);
+          if (preFillFuel != null) {
+            const diff = openingFuel1 - preFillFuel;
+            if (diff >= 10) {
+              const fillAmount = diff;
+              const pctDiff = (openingPct1 != null && lowestBetween?.fuel_probe_1_level_percentage != null)
+                ? openingPct1 - lowestBetween.fuel_probe_1_level_percentage
+                : (openingPct1 != null && prevSession.closing_percentage_probe_1 != null)
+                  ? openingPct1 - prevSession.closing_percentage_probe_1 : null;
 
-            const { error: fillError } = await supabase
-              .from('energy_rite_fuel_fills')
-              .insert({
-                plate,
-                fill_date: sessionDate,
-                fuel_before: prevSession.closing_fuel_probe_1,
-                fuel_after: openingFuel1,
-                fill_amount: fillAmount,
-                fill_percentage: pctDiff,
-                detection_method: 'SESSION_COMPARISON',
-                status: 'COMPLETED',
-                fill_data: JSON.stringify({
-                  previous_session_end: prevSession.session_end_time,
-                  current_session_start: time,
-                  previous_closing_fuel: prevSession.closing_fuel_probe_1,
-                  current_opening_fuel: openingFuel1
-                })
-              });
+              console.log(`[fill] DETECTED: ${plate} fill=${fillAmount.toFixed(1)}L (${preFillFuel}→${openingFuel1})`);
 
-            if (fillError) {
-              console.error(`[fill] INSERT ERROR: ${plate}`, fillError.message);
-            } else {
-              console.log(`[fill] INSERTED: ${plate} ${fillAmount.toFixed(1)}L`);
-            }
+              const { error: fillError } = await supabase
+                .from('energy_rite_fuel_fills')
+                .insert({
+                  plate,
+                  fill_date: sessionDate,
+                  fuel_before: preFillFuel,
+                  fuel_after: openingFuel1,
+                  fill_amount: fillAmount,
+                  fill_percentage: pctDiff,
+                  detection_method: 'SESSION_COMPARISON',
+                  status: 'COMPLETED',
+                  fill_data: JSON.stringify({
+                    previous_session_end: prevSession.session_end_time,
+                    current_session_start: time,
+                    lowest_between: lowestBetween?.fuel_probe_1_volume_in_tank ?? null,
+                    previous_closing_fuel: prevSession.closing_fuel_probe_1,
+                    current_opening_fuel: openingFuel1
+                  })
+                });
 
-            if (data?.id) {
-              const { error: updateErr } = await supabase
-                .from('energy_rite_operating_sessions')
-                .update({
-                  fill_events: 1,
-                  fill_amount_during_session: fillAmount
-                })
-                .eq('id', data.id);
+              if (fillError) {
+                console.error(`[fill] INSERT ERROR: ${plate}`, fillError.message);
+              } else {
+                console.log(`[fill] INSERTED: ${plate} ${fillAmount.toFixed(1)}L`);
+              }
 
-              if (updateErr) {
-                console.error(`[fill] SESSION UPDATE ERROR: ${plate}`, updateErr.message);
+              if (data?.id) {
+                const { error: updateErr } = await supabase
+                  .from('energy_rite_operating_sessions')
+                  .update({
+                    fill_events: 1,
+                    fill_amount_during_session: fillAmount
+                  })
+                  .eq('id', data.id);
+
+                if (updateErr) {
+                  console.error(`[fill] SESSION UPDATE ERROR: ${plate}`, updateErr.message);
+                }
               }
             }
           }
@@ -225,11 +233,24 @@ const createClient = (wsUrl) => {
       const endTime = new Date(time);
       const operatingHours = Math.max(0, (endTime - startTime) / (1000 * 60 * 60));
 
-      const usage1 = (openSession.opening_fuel_probe_1 != null && closingFuel1 != null)
-        ? Math.max(0, openSession.opening_fuel_probe_1 - closingFuel1) : 0;
-      const usage2 = (openSession.opening_fuel_probe_2 != null && closingFuel2 != null)
-        ? Math.max(0, openSession.opening_fuel_probe_2 - closingFuel2) : 0;
-      const totalUsage = usage1 + usage2;
+      const hasFuelData = await db.countFuelReadingsBetween(plate, openSession.session_start_time, time);
+
+      let usage1 = 0;
+      let usage2 = 0;
+      let totalUsage = 0;
+
+      if (hasFuelData > 0) {
+        usage1 = (openSession.opening_fuel_probe_1 != null && closingFuel1 != null)
+          ? Math.max(0, openSession.opening_fuel_probe_1 - closingFuel1) : 0;
+        usage2 = (openSession.opening_fuel_probe_2 != null && closingFuel2 != null)
+          ? Math.max(0, openSession.opening_fuel_probe_2 - closingFuel2) : 0;
+        totalUsage = usage1 + usage2;
+      } else {
+        usage1 = 0;
+        usage2 = 0;
+        totalUsage = 0;
+        console.log(`[session] NO FUEL DATA during session for ${plate} — usage set to 0`);
+      }
 
       const literUsagePerHour = (operatingHours > 0) ? totalUsage / operatingHours : null;
 
