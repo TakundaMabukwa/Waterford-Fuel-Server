@@ -102,7 +102,7 @@ function addActivityData(worksheet, activityData) {
   });
   
   // Add site data
-  activityData.sites.forEach(site => {
+  activityData.sessions.forEach(site => {
     if (site.session_count > 0) {
       // Get fuel costs from financial breakdown
       const morningCost = fuelAnalysis.financial_breakdown.morning.cost_per_site[site.branch] || 0;

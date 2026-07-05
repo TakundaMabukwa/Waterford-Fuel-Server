@@ -13,6 +13,10 @@ services:
       - PORT=4000
       - SUPABASE_URL=https://hziksqggnmjftimwgyyk.supabase.co
       - SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imh6aWtzcWdnbm1qZnRpbXdneXlrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njk4NDc5NDQsImV4cCI6MjA4NTQyMzk0NH0.4_n8TXZ1lKYer2srmtexe1En1KfEnehXmykvsjqGVBY
+      - SUPABASE_SERVICE_ROLE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imh6aWtzcWdnbm1qZnRpbXdneXlrIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2OTg0Nzk0NSwiZXhwIjoyMDg1NDIzOTQ1fQ.placeholder
+      - NOTIFICATIONAPI_CLIENT_ID=uodwgskvfei6mc4hdaaiivz04y
+      - NOTIFICATIONAPI_CLIENT_SECRET=x64v91xu1haw3lt2pgka9c379d468ahmzxvf6hgzl3bdpe7m33pukcy02u
+      - EMAIL_FROM=admin@solflo.co.za
     depends_on:
       postgres:
         condition: service_healthy
