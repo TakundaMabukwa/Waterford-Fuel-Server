@@ -82,6 +82,99 @@ const createClient = (wsUrl) => {
     return row;
   };
 
+  const checkFuelFillDuringOperation = async (msg, decoded, msgType) => {
+    if (msgType !== 405 || !hasFuelData(decoded)) return;
+
+    const plate = msg.plate;
+    const time = msg.loc_time;
+    const currentFuel1 = decoded?.tank1?.volume ?? null;
+
+    if (currentFuel1 == null || currentFuel1 <= 0) return;
+
+    try {
+      const { data: openSession } = await supabase
+        .from('energy_rite_operating_sessions')
+        .select('id, session_start_time')
+        .eq('branch', plate)
+        .eq('session_status', 'ONGOING')
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .single();
+
+      if (!openSession) return;
+
+      const timeDate = new Date(time.replace(' ', 'T') + 'Z');
+      const twoMinAgo = new Date(timeDate.getTime() - 2 * 60 * 1000);
+      const twoMinAgoStr = twoMinAgo.toISOString().replace('T', ' ').replace('Z', '').substring(0, 19);
+
+      const readings = await db.getFuelReadingsBetween(plate, twoMinAgoStr, time);
+
+      if (readings.length < 2) return;
+
+      const earliest = readings[0];
+      const latest = readings[readings.length - 1];
+
+      const earliestFuel = earliest.fuel_probe_1_volume_in_tank;
+      const latestFuel = latest.fuel_probe_1_volume_in_tank;
+
+      if (earliestFuel == null || latestFuel == null) return;
+
+      const fuelIncrease = latestFuel - earliestFuel;
+
+      if (fuelIncrease >= 10) {
+        const earliestTime = earliest.loc_time;
+        const timeDiffMin = (new Date(time.replace(' ', 'T') + 'Z') - new Date(earliestTime.replace(' ', 'T') + 'Z')) / 60000;
+
+        if (timeDiffMin <= 2) {
+          console.log(`[fill] DETECTED DURING OPERATION: ${plate} +${fuelIncrease.toFixed(1)}L in ${timeDiffMin.toFixed(1)}min (${earliestFuel}→${latestFuel})`);
+
+          const sessionDate = time.split(' ')[0];
+
+          const { error: fillError } = await supabase
+            .from('energy_rite_fuel_fills')
+            .insert({
+              plate,
+              fill_date: sessionDate,
+              fuel_before: earliestFuel,
+              fuel_after: latestFuel,
+              fill_amount: fuelIncrease,
+              fill_percentage: null,
+              detection_method: 'OPERATION_10L_2MIN',
+              status: 'COMPLETED',
+              fill_data: JSON.stringify({
+                session_id: openSession.id,
+                earliest_time: earliestTime,
+                latest_time: time,
+                earliest_fuel: earliestFuel,
+                latest_fuel: latestFuel,
+                time_diff_minutes: timeDiffMin
+              })
+            });
+
+          if (fillError) {
+            console.error(`[fill] INSERT ERROR: ${plate}`, fillError.message);
+          } else {
+            console.log(`[fill] INSERTED: ${plate} ${fuelIncrease.toFixed(1)}L`);
+
+            const { error: updateErr } = await supabase
+              .from('energy_rite_operating_sessions')
+              .update({
+                fill_events: (openSession.fill_events || 0) + 1,
+                fill_amount_during_session: (openSession.fill_amount_during_session || 0) + fuelIncrease
+              })
+              .eq('id', openSession.id);
+
+            if (updateErr) {
+              console.error(`[fill] SESSION UPDATE ERROR: ${plate}`, updateErr.message);
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.error(`[fill] Error during operation check: ${err.message}`);
+    }
+  };
+
   const logStatusEvents = async (msg, decoded) => {
     const status = (msg.status || '').toUpperCase();
     if (!status) return;
@@ -233,23 +326,16 @@ const createClient = (wsUrl) => {
       const endTime = new Date(time);
       const operatingHours = Math.max(0, (endTime - startTime) / (1000 * 60 * 60));
 
-      const hasFuelData = await db.countFuelReadingsBetween(plate, openSession.session_start_time, time);
+      let usage1 = (openSession.opening_fuel_probe_1 != null && closingFuel1 != null)
+        ? Math.max(0, openSession.opening_fuel_probe_1 - closingFuel1) : 0;
+      let usage2 = (openSession.opening_fuel_probe_2 != null && closingFuel2 != null)
+        ? Math.max(0, openSession.opening_fuel_probe_2 - closingFuel2) : 0;
+      let totalUsage = usage1 + usage2;
 
-      let usage1 = 0;
-      let usage2 = 0;
-      let totalUsage = 0;
-
-      if (hasFuelData > 0) {
-        usage1 = (openSession.opening_fuel_probe_1 != null && closingFuel1 != null)
-          ? Math.max(0, openSession.opening_fuel_probe_1 - closingFuel1) : 0;
-        usage2 = (openSession.opening_fuel_probe_2 != null && closingFuel2 != null)
-          ? Math.max(0, openSession.opening_fuel_probe_2 - closingFuel2) : 0;
-        totalUsage = usage1 + usage2;
-      } else {
-        usage1 = 0;
-        usage2 = 0;
-        totalUsage = 0;
-        console.log(`[session] NO FUEL DATA during session for ${plate} — usage set to 0`);
+      if (totalUsage === 0 && openSession.opening_fuel_probe_1 != null && closingFuel1 != null) {
+        console.log(`[session] ZERO USAGE: ${plate} opening=${openSession.opening_fuel_probe_1} closing=${closingFuel1} — fuel values present but no difference`);
+      } else if (totalUsage === 0) {
+        console.log(`[session] NO FUEL DATA: ${plate} opening=${openSession.opening_fuel_probe_1 ?? 'null'} closing=${closingFuel1 ?? 'null'}`);
       }
 
       const literUsagePerHour = (operatingHours > 0) ? totalUsage / operatingHours : null;
@@ -322,6 +408,12 @@ const createClient = (wsUrl) => {
       await logStatusEvents(msg, decoded);
     } catch (err) {
       console.error(`[session] Error: ${err.message}`);
+    }
+
+    try {
+      await checkFuelFillDuringOperation(msg, decoded, messageType);
+    } catch (err) {
+      console.error(`[fill-check] Error: ${err.message}`);
     }
 
     if (messageType === 405 && hasFuelData(decoded)) {

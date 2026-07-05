@@ -380,6 +380,19 @@ const getLowestFuelBetween = async (plate, startTime, endTime) => {
   return rows[0] || null;
 };
 
+const getFuelReadingsBetween = async (plate, startTime, endTime) => {
+  const { rows } = await query(
+    `SELECT ${FUEL_PROBE_COLUMNS.join(', ')}, loc_time
+     FROM vehicle_history
+     WHERE plate = $1 AND loc_time > $2 AND loc_time < $3
+       AND fuel_probe_1_volume_in_tank IS NOT NULL
+       AND fuel_probe_1_volume_in_tank > 0
+     ORDER BY loc_time ASC`,
+    [plate, startTime, endTime]
+  );
+  return rows;
+};
+
 const countFuelReadingsBetween = async (plate, startTime, endTime) => {
   const { rows } = await query(
     `SELECT COUNT(*) as cnt
@@ -413,5 +426,5 @@ module.exports = {
   init, close, query, isKnownVehicle, getCostCode, insertHistory, upsertLatest,
   getLowestFuelBefore, getLowestFuelAfter, getLastEngineEventBefore, getFuelFillBetween,
   getLastFuelBefore, getHighestFuelBefore, getLastFuelReading, getLastFuelReadingAfter,
-  getPreviousSessionClosing, getLowestFuelBetween, countFuelReadingsBetween
+  getPreviousSessionClosing, getLowestFuelBetween, getFuelReadingsBetween, countFuelReadingsBetween
 };
