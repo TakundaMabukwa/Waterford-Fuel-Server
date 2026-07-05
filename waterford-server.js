@@ -8,6 +8,24 @@ const app = express();
 app.use(express.json());
 app.use(cors());
 
+// Routes
+app.use('/api/energy-rite', require('./routes/energy-rite-data'));
+app.use('/api/energy-rite/vehicles', require('./routes/energy-rite-vehicles'));
+app.use('/api/energy-rite/reports', require('./routes/energy-rite-reports'));
+app.use('/api/energy-rite/report-storage', require('./routes/energy-rite-report-storage'));
+app.use('/api/energy-rite/fuel-analysis', require('./routes/energy-rite-fuel-analysis'));
+app.use('/api/energy-rite/emails', require('./routes/energy-rite-emails'));
+app.use('/api/energy-rite/excel-reports', require('./routes/energy-rite-excel-reports'));
+app.use('/api/energy-rite/activity-reports', require('./routes/energy-rite-activity-reports'));
+app.use('/api/energy-rite/activity-excel-reports', require('./routes/energy-rite-activity-excel-reports'));
+app.use('/api/energy-rite/monitoring', require('./routes/energy-rite-monitoring'));
+app.use('/api/energy-rite/executive-dashboard', require('./routes/energy-rite-executive-dashboard'));
+app.use('/api/energy-rite/enhanced-executive-dashboard', require('./routes/enhanced-executive-dashboard'));
+app.use('/api/energy-rite/report-distribution', require('./routes/energy-rite-report-distribution'));
+app.use('/api/energy-rite/fuel-fills', require('./routes/energy-rite-fuel-fills'));
+app.use('/api/energy-rite/cumulative-snapshots', require('./routes/energy-rite-cumulative-snapshots'));
+app.use('/api/cost-center-access', require('./routes/cost-center-access'));
+
 app.get('/health', (req, res) => {
   res.json({
     status: 'OK',
@@ -16,6 +34,7 @@ app.get('/health', (req, res) => {
   });
 });
 
+// Vehicle latest endpoints
 app.get('/api/vehicles', async (req, res) => {
   try {
     const { rows } = await db.query(

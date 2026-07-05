@@ -5,7 +5,7 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm ci --omit=dev
 
-COPY waterford-fuel-decoder.js waterford-db.js waterford-ws-client.js waterford-server.js supabase-client.js ./
+COPY . .
 
 EXPOSE 4000
 
