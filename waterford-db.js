@@ -423,12 +423,12 @@ const getLowestFuelBetweenTimes = async (plate, startTime, endTime) => {
   return rows[0] || null;
 };
 
-const checkFillRecorded = async (plate, triggerTime) => {
+const checkFillRecorded = async (plate, engineOffTime) => {
   const { rows } = await query(
     `SELECT id FROM energy_rite_fuel_fills
-     WHERE plate = $1 AND fill_data::text LIKE '%' || $2 || '%'
+     WHERE plate = $1 AND fill_data->>'engine_off_time' = $2
      LIMIT 1`,
-    [plate, triggerTime]
+    [plate, engineOffTime]
   );
   return rows.length > 0;
 };
