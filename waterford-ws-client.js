@@ -89,28 +89,15 @@ const createClient = (wsUrl) => {
 
     const plate = msg.plate;
     const time = msg.loc_time;
-    const currentFuel1 = decoded?.tank1?.volume ?? null;
-    const currentPct1 = decoded?.tank1?.percentage ?? null;
-    const currentFuel2 = decoded?.tank2?.volume ?? null;
-    const currentPct2 = decoded?.tank2?.percentage ?? null;
 
     if (status.includes('ENGINE ON') || status.includes('IGNITION ON')) {
       console.log(`[event] ENGINE ON: ${plate} at ${time}`);
 
-      let openingFuel1 = currentFuel1;
-      let openingPct1 = currentPct1;
-      let openingFuel2 = currentFuel2;
-      let openingPct2 = currentPct2;
-
-      if (openingFuel1 == null) {
-        const fallback = await db.getLastFuelReading(plate, time);
-        if (fallback) {
-          openingFuel1 = fallback.fuel_probe_1_volume_in_tank;
-          openingPct1 = fallback.fuel_probe_1_level_percentage;
-          openingFuel2 = fallback.fuel_probe_2_volume_in_tank;
-          openingPct2 = fallback.fuel_probe_2_level_percentage;
-        }
-      }
+      const lastFuel = await db.getLastFuelReading(plate, time);
+      let openingFuel1 = lastFuel?.fuel_probe_1_volume_in_tank ?? null;
+      let openingPct1 = lastFuel?.fuel_probe_1_level_percentage ?? null;
+      let openingFuel2 = lastFuel?.fuel_probe_2_volume_in_tank ?? null;
+      let openingPct2 = lastFuel?.fuel_probe_2_level_percentage ?? null;
 
       const sessionDate = time.split(' ')[0];
 
@@ -155,18 +142,11 @@ const createClient = (wsUrl) => {
         return;
       }
 
-      let closingFuel1 = currentFuel1;
-      let closingPct1 = currentPct1;
-      let closingFuel2 = currentFuel2;
-      let closingPct2 = currentPct2;
-
-      if (closingFuel1 == null) {
-        const lastFuel = await db.getLastFuelReading(plate, time);
-        closingFuel1 = lastFuel?.fuel_probe_1_volume_in_tank ?? null;
-        closingPct1 = lastFuel?.fuel_probe_1_level_percentage ?? null;
-        closingFuel2 = lastFuel?.fuel_probe_2_volume_in_tank ?? null;
-        closingPct2 = lastFuel?.fuel_probe_2_level_percentage ?? null;
-      }
+      const firstFuel = await db.getFirstFuelReadingAfter(plate, time);
+      let closingFuel1 = firstFuel?.fuel_probe_1_volume_in_tank ?? null;
+      let closingPct1 = firstFuel?.fuel_probe_1_level_percentage ?? null;
+      let closingFuel2 = firstFuel?.fuel_probe_2_volume_in_tank ?? null;
+      let closingPct2 = firstFuel?.fuel_probe_2_level_percentage ?? null;
 
       const startTime = new Date(openSession.session_start_time);
       const endTime = new Date(time);
