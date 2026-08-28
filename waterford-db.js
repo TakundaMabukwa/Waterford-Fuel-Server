@@ -393,6 +393,46 @@ const getFuelReadingsBetween = async (plate, startTime, endTime) => {
   return rows;
 };
 
+const getLastEngineOffBefore = async (plate, locTime) => {
+  const { rows } = await query(
+    `SELECT status, loc_time
+     FROM vehicle_history
+     WHERE plate = $1 AND loc_time < $2
+       AND (
+         UPPER(status) LIKE '%ENGINE OFF%'
+         OR UPPER(status) LIKE '%IGNITION OFF%'
+       )
+     ORDER BY loc_time DESC
+     LIMIT 1`,
+    [plate, locTime]
+  );
+  return rows[0] || null;
+};
+
+const getLowestFuelBetweenTimes = async (plate, startTime, endTime) => {
+  const { rows } = await query(
+    `SELECT fuel_probe_1_volume_in_tank, fuel_probe_2_volume_in_tank, loc_time
+     FROM vehicle_history
+     WHERE plate = $1 AND loc_time > $2 AND loc_time < $3
+       AND fuel_probe_1_volume_in_tank IS NOT NULL
+       AND fuel_probe_1_volume_in_tank > 0
+     ORDER BY fuel_probe_1_volume_in_tank ASC
+     LIMIT 1`,
+    [plate, startTime, endTime]
+  );
+  return rows[0] || null;
+};
+
+const checkFillRecorded = async (plate, triggerTime) => {
+  const { rows } = await query(
+    `SELECT id FROM energy_rite_fuel_fills
+     WHERE plate = $1 AND fill_data::text LIKE '%' || $2 || '%'
+     LIMIT 1`,
+    [plate, triggerTime]
+  );
+  return rows.length > 0;
+};
+
 const countFuelReadingsBetween = async (plate, startTime, endTime) => {
   const { rows } = await query(
     `SELECT COUNT(*) as cnt
@@ -426,5 +466,6 @@ module.exports = {
   init, close, query, isKnownVehicle, getCostCode, insertHistory, upsertLatest,
   getLowestFuelBefore, getLowestFuelAfter, getLastEngineEventBefore, getFuelFillBetween,
   getLastFuelBefore, getHighestFuelBefore, getLastFuelReading, getLastFuelReadingAfter,
-  getPreviousSessionClosing, getLowestFuelBetween, getFuelReadingsBetween, countFuelReadingsBetween
+  getPreviousSessionClosing, getLowestFuelBetween, getFuelReadingsBetween, countFuelReadingsBetween,
+  getLastEngineOffBefore, getLowestFuelBetweenTimes, checkFillRecorded
 };
