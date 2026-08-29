@@ -7,20 +7,32 @@ function toPositiveNumber(value) {
 }
 
 function calculateProbeUsage(session) {
-  const openingProbe1 = toPositiveNumber(session.opening_fuel_probe_1);
-  const closingProbe1 = toPositiveNumber(session.closing_fuel_probe_1);
-  const openingProbe2 = toPositiveNumber(session.opening_fuel_probe_2);
-  const closingProbe2 = toPositiveNumber(session.closing_fuel_probe_2);
+  const hasClosingProbe1 = session.closing_fuel_probe_1 !== null && session.closing_fuel_probe_1 !== undefined;
+  const hasClosingProbe2 = session.closing_fuel_probe_2 !== null && session.closing_fuel_probe_2 !== undefined;
 
-  const probe1Usage = Math.max(0, openingProbe1 - closingProbe1);
-  const probe2Usage = Math.max(0, openingProbe2 - closingProbe2);
-  const combinedUsage = probe1Usage + probe2Usage;
+  const openingProbe1 = toPositiveNumber(session.opening_fuel_probe_1);
+  const openingProbe2 = toPositiveNumber(session.opening_fuel_probe_2);
   const totalUsage = toPositiveNumber(session.total_usage || session.fuel_usage);
 
+  if (hasClosingProbe1 && hasClosingProbe2) {
+    const closingProbe1 = toPositiveNumber(session.closing_fuel_probe_1);
+    const closingProbe2 = toPositiveNumber(session.closing_fuel_probe_2);
+
+    const probe1Usage = Math.max(0, openingProbe1 - closingProbe1);
+    const probe2Usage = Math.max(0, openingProbe2 - closingProbe2);
+    const combinedUsage = probe1Usage + probe2Usage;
+
+    return {
+      fuel_usage_probe_1: probe1Usage,
+      fuel_usage_probe_2: probe2Usage,
+      total_fuel_usage: combinedUsage > 0 ? combinedUsage : totalUsage,
+    };
+  }
+
   return {
-    fuel_usage_probe_1: probe1Usage,
-    fuel_usage_probe_2: probe2Usage,
-    total_fuel_usage: combinedUsage > 0 ? combinedUsage : totalUsage,
+    fuel_usage_probe_1: 0,
+    fuel_usage_probe_2: 0,
+    total_fuel_usage: totalUsage,
   };
 }
 
