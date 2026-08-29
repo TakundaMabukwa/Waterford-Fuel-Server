@@ -8,6 +8,7 @@ const createClient = (wsUrl) => {
   let reconnectTimer = null;
   let messageCount = 0;
   const theftTracking = {};
+  const fillTracking = {};
   const lastEngineStatus = {};
 
   const parseMessage = (raw) => {
@@ -124,6 +125,8 @@ const createClient = (wsUrl) => {
 
     await processTheftStatus(msg);
     await processTheftFuelReading(msg, decoded);
+    await processFillStatus(msg);
+    await processFillFuelReading(msg, decoded);
   };
 
   const trackEngineStatus = (msg) => {
@@ -134,6 +137,7 @@ const createClient = (wsUrl) => {
     } else if (status.includes('ENGINE ON') || status.includes('IGNITION ON') || status.includes('PTO ON')) {
       lastEngineStatus[plate] = { off: false, time: msg.loc_time };
       delete theftTracking[plate];
+      delete fillTracking[plate];
     }
   };
 
@@ -285,6 +289,148 @@ const createClient = (wsUrl) => {
     }
 
     delete theftTracking[plate];
+  };
+
+  const processFillStatus = async (msg) => {
+    const status = (msg.status || '').toUpperCase();
+    const plate = msg.plate;
+    if (!status.includes('POSSIBLE FUEL FILL')) return;
+    if (fillTracking[plate]) return;
+    if (!isVehicleEngineOff(plate)) {
+      console.log(`[fill] Ignored POSSIBLE FUEL FILL for ${plate} - engine not OFF`);
+      return;
+    }
+
+    const alreadyRecorded = await db.checkFillRecorded(plate, lastEngineStatus[plate].time);
+    if (alreadyRecorded) {
+      console.log(`[fill] Ignored POSSIBLE FUEL FILL for ${plate} - already recorded`);
+      return;
+    }
+
+    const engineOffTime = lastEngineStatus[plate].time;
+    const readings = await db.getFuelReadingsBetween(plate, engineOffTime, msg.loc_time);
+    if (readings.length === 0) {
+      console.log(`[fill] No fuel readings found between engine off and fill status for ${plate}`);
+      return;
+    }
+
+    let lowestFuel = Infinity;
+    let lowestProbe1 = 0;
+    let lowestProbe2 = 0;
+    let lowestLocTime = null;
+
+    for (const r of readings) {
+      const p1 = r.fuel_probe_1_volume_in_tank || 0;
+      const p2 = r.fuel_probe_2_volume_in_tank || 0;
+      const combined = p1 + p2;
+      if (combined > 0 && combined < lowestFuel) {
+        lowestFuel = combined;
+        lowestProbe1 = p1;
+        lowestProbe2 = p2;
+        lowestLocTime = r.loc_time;
+      }
+    }
+
+    if (lowestFuel === Infinity) {
+      console.log(`[fill] No valid fuel baseline found for ${plate}`);
+      return;
+    }
+
+    const currentP1 = parseFloat(decoded?.tank1?.volume) || 0;
+    const currentP2 = parseFloat(decoded?.tank2?.volume) || 0;
+    const currentFuel = currentP1 + currentP2;
+
+    fillTracking[plate] = {
+      baselineFuel: lowestFuel,
+      baselineProbe1: lowestProbe1,
+      baselineProbe2: lowestProbe2,
+      highestFuel: currentFuel,
+      highestProbe1: currentP1,
+      highestProbe2: currentP2,
+      highestLocTime: msg.loc_time,
+      consecutiveNoIncrease: 0,
+      startTime: msg.loc_time,
+      engineOffTime: engineOffTime,
+      costCode: db.getCostCode(plate)
+    };
+
+    console.log(`[fill] FILL TRACKING STARTED: ${plate} - baseline: ${lowestFuel}L at ${lowestLocTime}`);
+  };
+
+  const processFillFuelReading = async (msg, decoded) => {
+    const plate = msg.plate;
+    const tracking = fillTracking[plate];
+    if (!tracking) return;
+    if (!decoded || !hasFuelData(decoded)) return;
+
+    const currentP1 = parseFloat(decoded?.tank1?.volume) || 0;
+    const currentP2 = parseFloat(decoded?.tank2?.volume) || 0;
+    const currentFuel = currentP1 + currentP2;
+    if (currentFuel <= 0) return;
+
+    if (currentFuel > tracking.highestFuel) {
+      tracking.highestFuel = currentFuel;
+      tracking.highestProbe1 = currentP1;
+      tracking.highestProbe2 = currentP2;
+      tracking.highestLocTime = msg.loc_time;
+      tracking.consecutiveNoIncrease = 0;
+    } else {
+      tracking.consecutiveNoIncrease++;
+    }
+
+    if (tracking.consecutiveNoIncrease >= 3) {
+      await completeFill(plate, tracking);
+    }
+  };
+
+  const completeFill = async (plate, tracking) => {
+    const fillAmount = tracking.highestFuel - tracking.baselineFuel;
+    if (fillAmount < 1) {
+      console.log(`[fill] Skipping fill for ${plate} - change too small (${fillAmount.toFixed(1)}L)`);
+      delete fillTracking[plate];
+      return;
+    }
+
+    const startDate = tracking.startTime.split('T')[0];
+    const startTimeIso = new Date(tracking.startTime).toISOString();
+    const endTimeIso = tracking.highestLocTime
+      ? new Date(tracking.highestLocTime).toISOString()
+      : new Date().toISOString();
+    const durationSeconds = (new Date(endTimeIso).getTime() - new Date(startTimeIso).getTime()) / 1000;
+
+    try {
+      await db.insertFillSession({
+        branch: plate,
+        company: 'WATERFORD',
+        cost_code: tracking.costCode,
+        session_date: startDate,
+        session_start_time: startTimeIso,
+        session_end_time: endTimeIso,
+        operating_hours: durationSeconds / 3600,
+        opening_fuel: tracking.baselineFuel,
+        opening_fuel_probe_1: tracking.baselineProbe1,
+        opening_fuel_probe_2: tracking.baselineProbe2,
+        opening_percentage: 0,
+        opening_percentage_probe_1: 0,
+        opening_percentage_probe_2: 0,
+        closing_fuel: tracking.highestFuel,
+        closing_fuel_probe_1: tracking.highestProbe1,
+        closing_fuel_probe_2: tracking.highestProbe2,
+        closing_percentage: 0,
+        closing_percentage_probe_1: 0,
+        closing_percentage_probe_2: 0,
+        total_fill: fillAmount,
+        session_status: 'FUEL_FILL_COMPLETED',
+        notes: `Fill detected. Baseline: ${tracking.baselineFuel}L, Peak: ${tracking.highestFuel}L, Filled: ${fillAmount.toFixed(1)}L`,
+        fill_data: { engine_off_time: tracking.engineOffTime }
+      });
+
+      console.log(`[fill] FILL RECORDED: ${plate} - ${tracking.baselineFuel}L -> ${tracking.highestFuel}L = +${fillAmount.toFixed(1)}L`);
+    } catch (err) {
+      console.error(`[fill] Failed to record fill for ${plate}:`, err.message);
+    }
+
+    delete fillTracking[plate];
   };
 
   const scheduleReconnect = () => {

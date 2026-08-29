@@ -304,6 +304,66 @@ const getRecentFuelReadings = async (plate, count) => {
   return rows.reverse();
 };
 
+const getLowestFuelBetweenTimes = async (plate, from, to) => {
+  const sql = `
+    SELECT fuel_probe_1_volume_in_tank, fuel_probe_2_volume_in_tank, loc_time, created_at
+    FROM vehicle_history
+    WHERE plate = $1
+      AND loc_time >= $2
+      AND loc_time <= $3
+      AND (fuel_probe_1_volume_in_tank > 0 OR fuel_probe_2_volume_in_tank > 0)
+    ORDER BY (COALESCE(fuel_probe_1_volume_in_tank, 0) + COALESCE(fuel_probe_2_volume_in_tank, 0)) ASC
+    LIMIT 1
+  `;
+  const { rows } = await query(sql, [plate, from, to]);
+  return rows.length > 0 ? rows[0] : null;
+};
+
+const checkFillRecorded = async (plate, engineOffTime) => {
+  const sql = `
+    SELECT id FROM energy_rite_operating_sessions
+    WHERE branch = $1
+      AND session_status = 'FUEL_FILL_COMPLETED'
+      AND fill_data->>'engine_off_time' = $2
+    LIMIT 1
+  `;
+  const { rows } = await query(sql, [plate, engineOffTime]);
+  return rows.length > 0;
+};
+
+const insertFillSession = async (session) => {
+  const sql = `
+    INSERT INTO energy_rite_operating_sessions (
+      branch, company, cost_code, session_date,
+      session_start_time, session_end_time, operating_hours,
+      opening_fuel, opening_percentage,
+      opening_fuel_probe_1, opening_fuel_probe_2,
+      opening_percentage_probe_1, opening_percentage_probe_2,
+      closing_fuel, closing_percentage,
+      closing_fuel_probe_1, closing_fuel_probe_2,
+      closing_percentage_probe_1, closing_percentage_probe_2,
+      total_fill, session_status, notes, fill_data
+    ) VALUES (
+      $1, $2, $3, $4, $5, $6, $7,
+      $8, $9, $10, $11, $12, $13,
+      $14, $15, $16, $17, $18, $19,
+      $20, $21, $22, $23
+    )
+  `;
+  await query(sql, [
+    session.branch, session.company, session.cost_code, session.session_date,
+    session.session_start_time, session.session_end_time, session.operating_hours,
+    session.opening_fuel, session.opening_percentage,
+    session.opening_fuel_probe_1, session.opening_fuel_probe_2,
+    session.opening_percentage_probe_1, session.opening_percentage_probe_2,
+    session.closing_fuel, session.closing_percentage,
+    session.closing_fuel_probe_1, session.closing_fuel_probe_2,
+    session.closing_percentage_probe_1, session.closing_percentage_probe_2,
+    session.total_fill, session.session_status, session.notes,
+    JSON.stringify(session.fill_data || {})
+  ]);
+};
+
 const checkTheftRecorded = async (plate, engineOffTime) => {
   const sql = `
     SELECT id FROM energy_rite_operating_sessions
@@ -368,6 +428,8 @@ const close = async () => {
 
 module.exports = {
   init, close, query, isKnownVehicle, getCostCode, insertHistory, upsertLatest,
-  getLastEngineOffBefore, getHighestFuelBetweenTimes, getFuelReadingsBetween,
-  getRecentFuelReadings, checkTheftRecorded, insertTheftSession
+  getLastEngineOffBefore, getHighestFuelBetweenTimes, getLowestFuelBetweenTimes,
+  getFuelReadingsBetween, getRecentFuelReadings,
+  checkFillRecorded, insertFillSession,
+  checkTheftRecorded, insertTheftSession
 };
