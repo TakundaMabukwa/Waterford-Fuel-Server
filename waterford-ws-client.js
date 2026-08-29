@@ -275,10 +275,11 @@ const createClient = (wsUrl) => {
     if (pendingSessionClose[msg.plate] && messageType === 405 && hasFuelData(decoded)) {
       try {
         const pending = pendingSessionClose[msg.plate];
-        const closingFuel1 = decoded?.tank1?.volume ?? null;
-        const closingPct1 = decoded?.tank1?.percentage ?? null;
-        const closingFuel2 = decoded?.tank2?.volume ?? null;
-        const closingPct2 = decoded?.tank2?.percentage ?? null;
+        const lastFuel = await db.getLastFuelReading(msg.plate, msg.loc_time);
+        const closingFuel1 = lastFuel?.fuel_probe_1_volume_in_tank ?? null;
+        const closingPct1 = lastFuel?.fuel_probe_1_level_percentage ?? null;
+        const closingFuel2 = lastFuel?.fuel_probe_2_volume_in_tank ?? null;
+        const closingPct2 = lastFuel?.fuel_probe_2_level_percentage ?? null;
 
         if (closingFuel1 != null) {
           const startTime = new Date(pending.sessionStartTime);
