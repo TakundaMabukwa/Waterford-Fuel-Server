@@ -10,6 +10,7 @@ const createClient = (wsUrl) => {
   let messageCount = 0;
   let rawCount = 0;
   const fillTracking = {};
+  const pendingSessionClose = {};
 
   const parseMessage = (raw) => {
     if (!raw || raw.length < 3) return null;
@@ -93,6 +94,54 @@ const createClient = (wsUrl) => {
     if (status.includes('ENGINE ON') || status.includes('IGNITION ON')) {
       console.log(`[event] ENGINE ON: ${plate} at ${time}`);
 
+      if (pendingSessionClose[plate]) {
+        const pending = pendingSessionClose[plate];
+        const lastFuel = await db.getLastFuelReading(plate, time);
+        const closingFuel1 = lastFuel?.fuel_probe_1_volume_in_tank ?? null;
+        const closingPct1 = lastFuel?.fuel_probe_1_level_percentage ?? null;
+        const closingFuel2 = lastFuel?.fuel_probe_2_volume_in_tank ?? null;
+        const closingPct2 = lastFuel?.fuel_probe_2_level_percentage ?? null;
+
+        if (closingFuel1 != null) {
+          const startTime = new Date(pending.sessionStartTime);
+          const endTime = new Date(pending.engineOffTime);
+          const operatingHours = Math.max(0, (endTime - startTime) / (1000 * 60 * 60));
+          let usage1 = (pending.openingFuel1 != null) ? Math.max(0, pending.openingFuel1 - closingFuel1) : 0;
+          let usage2 = (pending.openingFuel2 != null) ? Math.max(0, pending.openingFuel2 - closingFuel2) : 0;
+          let totalUsage = usage1 + usage2;
+          const literUsagePerHour = (operatingHours > 0) ? totalUsage / operatingHours : null;
+          const costPerLiter = 20.00;
+          const durationH = operatingHours.toFixed(2);
+          const usedL = totalUsage.toFixed(1);
+          const notes = `Engine stopped. Duration: ${durationH}h, Opening1: ${pending.openingFuel1 ?? 'N/A'}L, Closing1: ${closingFuel1}L, Used: ${usedL}L (probe1: ${usage1.toFixed(1)}L, probe2: ${usage2.toFixed(1)}L)`;
+
+          const { error } = await supabase
+            .from('energy_rite_operating_sessions')
+            .update({
+              session_end_time: pending.engineOffTime,
+              session_status: 'COMPLETED',
+              closing_fuel_probe_1: closingFuel1,
+              closing_percentage_probe_1: closingPct1,
+              closing_fuel_probe_2: closingFuel2,
+              closing_percentage_probe_2: closingPct2,
+              operating_hours: operatingHours,
+              total_usage: totalUsage,
+              liter_usage_per_hour: literUsagePerHour,
+              cost_per_liter: costPerLiter,
+              cost_for_usage: totalUsage * costPerLiter,
+              notes
+            })
+            .eq('id', pending.sessionId);
+
+          if (error) {
+            console.error(`[session] CLOSE ERROR: ${plate}`, error.message);
+          } else {
+            console.log(`[session] CLOSE (before new ON): ${plate} session #${pending.sessionId} used=${usedL}L`);
+          }
+        }
+        delete pendingSessionClose[plate];
+      }
+
       const lastFuel = await db.getLastFuelReading(plate, time);
       let openingFuel1 = lastFuel?.fuel_probe_1_volume_in_tank ?? null;
       let openingPct1 = lastFuel?.fuel_probe_1_level_percentage ?? null;
@@ -142,62 +191,14 @@ const createClient = (wsUrl) => {
         return;
       }
 
-      const firstFuel = await db.getFirstFuelReadingAfter(plate, time);
-      let closingFuel1 = firstFuel?.fuel_probe_1_volume_in_tank ?? null;
-      let closingPct1 = firstFuel?.fuel_probe_1_level_percentage ?? null;
-      let closingFuel2 = firstFuel?.fuel_probe_2_volume_in_tank ?? null;
-      let closingPct2 = firstFuel?.fuel_probe_2_level_percentage ?? null;
-
-      const startTime = new Date(openSession.session_start_time);
-      const endTime = new Date(time);
-      const operatingHours = Math.max(0, (endTime - startTime) / (1000 * 60 * 60));
-
-      let usage1 = (openSession.opening_fuel_probe_1 != null && closingFuel1 != null)
-        ? Math.max(0, openSession.opening_fuel_probe_1 - closingFuel1) : 0;
-      let usage2 = (openSession.opening_fuel_probe_2 != null && closingFuel2 != null)
-        ? Math.max(0, openSession.opening_fuel_probe_2 - closingFuel2) : 0;
-      let totalUsage = usage1 + usage2;
-
-      if (totalUsage === 0 && openSession.opening_fuel_probe_1 != null && closingFuel1 != null) {
-        console.log(`[session] ZERO USAGE: ${plate} opening=${openSession.opening_fuel_probe_1} closing=${closingFuel1} — fuel values present but no difference`);
-      } else if (totalUsage === 0) {
-        console.log(`[session] NO FUEL DATA: ${plate} opening=${openSession.opening_fuel_probe_1 ?? 'null'} closing=${closingFuel1 ?? 'null'}`);
-      }
-
-      const literUsagePerHour = (operatingHours > 0) ? totalUsage / operatingHours : null;
-
-      const costPerLiter = 20.00;
-      const costForUsage = totalUsage * costPerLiter;
-
-      const durationH = operatingHours.toFixed(2);
-      const opening1 = openSession.opening_fuel_probe_1 ?? 'N/A';
-      const closing1 = closingFuel1 ?? 'N/A';
-      const usedL = totalUsage.toFixed(1);
-      const notes = `Engine stopped. Duration: ${durationH}h, Opening1: ${opening1}L, Closing1: ${closing1}L, Used: ${usedL}L (probe1: ${usage1.toFixed(1)}L, probe2: ${usage2.toFixed(1)}L)`;
-
-      const { error } = await supabase
-        .from('energy_rite_operating_sessions')
-        .update({
-          session_end_time: time,
-          session_status: 'COMPLETED',
-          closing_fuel_probe_1: closingFuel1,
-          closing_percentage_probe_1: closingPct1,
-          closing_fuel_probe_2: closingFuel2,
-          closing_percentage_probe_2: closingPct2,
-          operating_hours: operatingHours,
-          total_usage: totalUsage,
-          liter_usage_per_hour: literUsagePerHour,
-          cost_per_liter: costPerLiter,
-          cost_for_usage: costForUsage,
-          notes
-        })
-        .eq('id', openSession.id);
-
-      if (error) {
-        console.error(`[session] UPDATE ERROR: ${plate}`, error.message);
-      } else {
-        console.log(`[session] CLOSE: ${plate} session #${openSession.id} used=${usedL}L probe1=${usage1.toFixed(1)}L probe2=${usage2.toFixed(1)}L hours=${durationH}h`);
-      }
+      pendingSessionClose[plate] = {
+        sessionId: openSession.id,
+        sessionStartTime: openSession.session_start_time,
+        openingFuel1: openSession.opening_fuel_probe_1,
+        openingFuel2: openSession.opening_fuel_probe_2,
+        engineOffTime: time
+      };
+      console.log(`[session] PENDING CLOSE: ${plate} session #${openSession.id} — waiting for next fuel reading`);
 
     } else if (status.includes('POSSIBLE FUEL FILL')) {
       if (!fillTracking[plate]) {
@@ -269,6 +270,68 @@ const createClient = (wsUrl) => {
       await logStatusEvents(msg, decoded);
     } catch (err) {
       console.error(`[session] Error: ${err.message}`);
+    }
+
+    if (pendingSessionClose[msg.plate] && messageType === 405 && hasFuelData(decoded)) {
+      try {
+        const pending = pendingSessionClose[msg.plate];
+        const closingFuel1 = decoded?.tank1?.volume ?? null;
+        const closingPct1 = decoded?.tank1?.percentage ?? null;
+        const closingFuel2 = decoded?.tank2?.volume ?? null;
+        const closingPct2 = decoded?.tank2?.percentage ?? null;
+
+        if (closingFuel1 != null) {
+          const startTime = new Date(pending.sessionStartTime);
+          const endTime = new Date(pending.engineOffTime);
+          const operatingHours = Math.max(0, (endTime - startTime) / (1000 * 60 * 60));
+
+          let usage1 = (pending.openingFuel1 != null && closingFuel1 != null)
+            ? Math.max(0, pending.openingFuel1 - closingFuel1) : 0;
+          let usage2 = (pending.openingFuel2 != null && closingFuel2 != null)
+            ? Math.max(0, pending.openingFuel2 - closingFuel2) : 0;
+          let totalUsage = usage1 + usage2;
+
+          const literUsagePerHour = (operatingHours > 0) ? totalUsage / operatingHours : null;
+          const costPerLiter = 20.00;
+          const costForUsage = totalUsage * costPerLiter;
+          const durationH = operatingHours.toFixed(2);
+          const opening1 = pending.openingFuel1 ?? 'N/A';
+          const closing1 = closingFuel1 ?? 'N/A';
+          const usedL = totalUsage.toFixed(1);
+          const notes = `Engine stopped. Duration: ${durationH}h, Opening1: ${opening1}L, Closing1: ${closing1}L, Used: ${usedL}L (probe1: ${usage1.toFixed(1)}L, probe2: ${usage2.toFixed(1)}L)`;
+
+          const { error } = await supabase
+            .from('energy_rite_operating_sessions')
+            .update({
+              session_end_time: pending.engineOffTime,
+              session_status: 'COMPLETED',
+              closing_fuel_probe_1: closingFuel1,
+              closing_percentage_probe_1: closingPct1,
+              closing_fuel_probe_2: closingFuel2,
+              closing_percentage_probe_2: closingPct2,
+              operating_hours: operatingHours,
+              total_usage: totalUsage,
+              liter_usage_per_hour: literUsagePerHour,
+              cost_per_liter: costPerLiter,
+              cost_for_usage: costForUsage,
+              notes
+            })
+            .eq('id', pending.sessionId);
+
+          if (error) {
+            console.error(`[session] UPDATE ERROR: ${msg.plate}`, error.message);
+          } else {
+            console.log(`[session] CLOSE: ${msg.plate} session #${pending.sessionId} used=${usedL}L probe1=${usage1.toFixed(1)}L probe2=${usage2.toFixed(1)}L hours=${durationH}h`);
+          }
+        } else {
+          console.log(`[session] NO FUEL IN READING: ${msg.plate} — cannot close session #${pending.sessionId}`);
+        }
+
+        delete pendingSessionClose[msg.plate];
+      } catch (err) {
+        console.error(`[session] Close error: ${err.message}`);
+        delete pendingSessionClose[msg.plate];
+      }
     }
 
     if (fillTracking[msg.plate] && messageType === 405 && hasFuelData(decoded)) {
