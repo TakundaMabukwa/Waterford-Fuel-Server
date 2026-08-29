@@ -1,16 +1,14 @@
 const WebSocket = require('ws');
 const { decodeFuelData, hasFuelData } = require('./waterford-fuel-decoder');
 const db = require('./waterford-db');
-const { supabase } = require('./supabase-client');
 
 const createClient = (wsUrl) => {
   let ws = null;
   let reconnectAttempts = 0;
   let reconnectTimer = null;
   let messageCount = 0;
-  let rawCount = 0;
-  const fillTracking = {};
-  const pendingSessionClose = {};
+  const theftTracking = {};
+  const lastEngineStatus = {};
 
   const parseMessage = (raw) => {
     if (!raw || raw.length < 3) return null;
@@ -84,171 +82,27 @@ const createClient = (wsUrl) => {
     return row;
   };
 
-  const logStatusEvents = async (msg, decoded) => {
+  const logStatusEvents = (msg) => {
     const status = (msg.status || '').toUpperCase();
     if (!status) return;
 
     const plate = msg.plate;
     const time = msg.loc_time;
 
-    if (status.includes('ENGINE ON') || status.includes('IGNITION ON')) {
+    if (status.includes('ENGINE ON') || status.includes('IGNITION ON') || status.includes('PTO ON')) {
       console.log(`[event] ENGINE ON: ${plate} at ${time}`);
-
-      if (pendingSessionClose[plate]) {
-        const pending = pendingSessionClose[plate];
-        const lastFuel = await db.getLastFuelReading(plate, time);
-        const closingFuel1 = lastFuel?.fuel_probe_1_volume_in_tank ?? null;
-        const closingPct1 = lastFuel?.fuel_probe_1_level_percentage ?? null;
-        const closingFuel2 = lastFuel?.fuel_probe_2_volume_in_tank ?? null;
-        const closingPct2 = lastFuel?.fuel_probe_2_level_percentage ?? null;
-
-        if (closingFuel1 != null) {
-          const startTime = new Date(pending.sessionStartTime);
-          const endTime = new Date(pending.engineOffTime);
-          const operatingHours = Math.max(0, (endTime - startTime) / (1000 * 60 * 60));
-          let usage1 = (pending.openingFuel1 != null) ? Math.max(0, pending.openingFuel1 - closingFuel1) : 0;
-          let usage2 = (pending.openingFuel2 != null) ? Math.max(0, pending.openingFuel2 - closingFuel2) : 0;
-          let totalUsage = usage1 + usage2;
-          const literUsagePerHour = (operatingHours > 0) ? totalUsage / operatingHours : null;
-          const costPerLiter = 20.00;
-          const durationH = operatingHours.toFixed(2);
-          const usedL = totalUsage.toFixed(1);
-          const notes = `Engine stopped. Duration: ${durationH}h, Opening1: ${pending.openingFuel1 ?? 'N/A'}L, Closing1: ${closingFuel1}L, Used: ${usedL}L (probe1: ${usage1.toFixed(1)}L, probe2: ${usage2.toFixed(1)}L)`;
-
-          const { error } = await supabase
-            .from('energy_rite_operating_sessions')
-            .update({
-              session_end_time: pending.engineOffTime,
-              session_status: 'COMPLETED',
-              closing_fuel_probe_1: closingFuel1,
-              closing_percentage_probe_1: closingPct1,
-              closing_fuel_probe_2: closingFuel2,
-              closing_percentage_probe_2: closingPct2,
-              operating_hours: operatingHours,
-              total_usage: totalUsage,
-              liter_usage_per_hour: literUsagePerHour,
-              cost_per_liter: costPerLiter,
-              cost_for_usage: totalUsage * costPerLiter,
-              notes
-            })
-            .eq('id', pending.sessionId);
-
-          if (error) {
-            console.error(`[session] CLOSE ERROR: ${plate}`, error.message);
-          } else {
-            console.log(`[session] CLOSE (before new ON): ${plate} session #${pending.sessionId} used=${usedL}L`);
-          }
-        }
-        delete pendingSessionClose[plate];
-      }
-
-      const lastFuel = await db.getLastFuelReading(plate, time);
-      let openingFuel1 = lastFuel?.fuel_probe_1_volume_in_tank ?? null;
-      let openingPct1 = lastFuel?.fuel_probe_1_level_percentage ?? null;
-      let openingFuel2 = lastFuel?.fuel_probe_2_volume_in_tank ?? null;
-      let openingPct2 = lastFuel?.fuel_probe_2_level_percentage ?? null;
-
-      const sessionDate = time.split(' ')[0];
-
-      const { data, error } = await supabase
-        .from('energy_rite_operating_sessions')
-        .insert({
-          branch: plate,
-          company: 'KFC',
-          cost_code: db.getCostCode(plate),
-          session_date: sessionDate,
-          session_start_time: time,
-          session_status: 'ONGOING',
-          opening_fuel_probe_1: openingFuel1,
-          opening_percentage_probe_1: openingPct1,
-          opening_fuel_probe_2: openingFuel2,
-          opening_percentage_probe_2: openingPct2
-        })
-        .select('id')
-        .single();
-
-      if (error) {
-        console.error(`[session] INSERT ERROR: ${plate}`, error.message);
-      } else {
-        console.log(`[session] OPEN: ${plate} session #${data.id} opening_fuel_1=${openingFuel1 ?? 'N/A'} opening_fuel_2=${openingFuel2 ?? 'N/A'}`);
-      }
-
-    } else if (status.includes('ENGINE OFF') || status.includes('IGNITION OFF')) {
+    } else if (status.includes('ENGINE OFF') || status.includes('IGNITION OFF') || status.includes('PTO OFF')) {
       console.log(`[event] ENGINE OFF: ${plate} at ${time}`);
-      delete fillTracking[plate];
-
-      const { data: openSession } = await supabase
-        .from('energy_rite_operating_sessions')
-        .select('id, session_start_time, opening_fuel_probe_1, opening_fuel_probe_2')
-        .eq('branch', plate)
-        .eq('session_status', 'ONGOING')
-        .order('created_at', { ascending: false })
-        .limit(1)
-        .single();
-
-      if (!openSession) {
-        console.log(`[session] NO OPEN SESSION: ${plate}`);
-        return;
-      }
-
-      pendingSessionClose[plate] = {
-        sessionId: openSession.id,
-        sessionStartTime: openSession.session_start_time,
-        openingFuel1: openSession.opening_fuel_probe_1,
-        openingFuel2: openSession.opening_fuel_probe_2,
-        engineOffTime: time
-      };
-      console.log(`[session] PENDING CLOSE: ${plate} session #${openSession.id} — waiting for next fuel reading`);
-
     } else if (status.includes('POSSIBLE FUEL FILL')) {
-      if (!fillTracking[plate]) {
-        const fuel1 = decoded?.tank1?.volume ?? null;
-        const fuel2 = decoded?.tank2?.volume ?? null;
-        if (fuel1 == null || fuel2 == null) return;
-
-        const engineOff = await db.getLastEngineOffBefore(plate, time);
-        if (!engineOff) {
-          console.log(`[fill] POSSIBLE FUEL FILL but no ENGINE OFF found for ${plate}`);
-          return;
-        }
-
-        const alreadyRecorded = await db.checkFillRecorded(plate, engineOff.loc_time);
-        if (alreadyRecorded) {
-          console.log(`[fill] Fill already recorded for ${plate} after engine off at ${engineOff.loc_time}`);
-          return;
-        }
-
-        const lowest = await db.getLowestFuelBetweenTimes(plate, engineOff.loc_time, time);
-        if (!lowest) {
-          console.log(`[fill] No fuel readings found between ENGINE OFF and fill trigger for ${plate}`);
-          return;
-        }
-
-        fillTracking[plate] = {
-          triggerTime: time,
-          preFuel1: lowest.fuel_probe_1_volume_in_tank,
-          preFuel2: lowest.fuel_probe_2_volume_in_tank,
-          maxFuel1: fuel1,
-          maxFuel2: fuel2,
-          lastFuel1: fuel1,
-          lastFuel2: fuel2,
-          noIncreaseCount: 0,
-          engineOffTime: engineOff.loc_time
-        };
-        console.log(`[fill] FILL STARTED: ${plate} baseline=${lowest.fuel_probe_1_volume_in_tank}/${lowest.fuel_probe_2_volume_in_tank} current=${fuel1}/${fuel2}`);
-      }
+      console.log(`[event] FUEL FILL: ${plate} at ${time}`);
     } else if (status.includes('POSSIBLE FUEL THEFT')) {
       console.log(`[event] FUEL THEFT: ${plate} at ${time}`);
     }
   };
 
   const handleMessage = async (raw) => {
-    rawCount++;
-    if (rawCount <= 5) console.log(`[ws] RAW: ${raw.substring(0, 200)}`);
-
     const msg = parseMessage(raw);
-    if (!msg) { if (rawCount <= 5) console.log(`[ws] PARSE FAILED`); return; }
-    if (!db.isKnownVehicle(msg.plate)) { if (rawCount <= 5) console.log(`[ws] UNKNOWN: ${msg.plate}`); return; }
+    if (!msg || !db.isKnownVehicle(msg.plate)) return;
 
     const decoded = msg.fuelDataRaw ? decodeFuelData(msg.fuelDataRaw) : null;
     const messageType = decoded?.messageType;
@@ -258,186 +112,179 @@ const createClient = (wsUrl) => {
       console.log(`[ws] ${messageCount} messages processed (latest: ${msg.plate})`);
     }
 
+    logStatusEvents(msg);
+    trackEngineStatus(msg);
+
     const row = buildRow(msg, decoded);
-
-    try {
-      await db.insertHistory(row);
-    } catch (err) {
-      console.error(`[db] INSERT HISTORY ERROR: ${msg.plate}`, err.message);
-    }
-
-    try {
-      await logStatusEvents(msg, decoded);
-    } catch (err) {
-      console.error(`[session] Error: ${err.message}`);
-    }
-
-    if (pendingSessionClose[msg.plate] && messageType === 405 && hasFuelData(decoded)) {
-      try {
-        const pending = pendingSessionClose[msg.plate];
-        const lastFuel = await db.getLastFuelReading(msg.plate, msg.loc_time);
-        const closingFuel1 = lastFuel?.fuel_probe_1_volume_in_tank ?? null;
-        const closingPct1 = lastFuel?.fuel_probe_1_level_percentage ?? null;
-        const closingFuel2 = lastFuel?.fuel_probe_2_volume_in_tank ?? null;
-        const closingPct2 = lastFuel?.fuel_probe_2_level_percentage ?? null;
-
-        if (closingFuel1 != null) {
-          const startTime = new Date(pending.sessionStartTime);
-          const endTime = new Date(pending.engineOffTime);
-          const operatingHours = Math.max(0, (endTime - startTime) / (1000 * 60 * 60));
-
-          let usage1 = (pending.openingFuel1 != null && closingFuel1 != null)
-            ? Math.max(0, pending.openingFuel1 - closingFuel1) : 0;
-          let usage2 = (pending.openingFuel2 != null && closingFuel2 != null)
-            ? Math.max(0, pending.openingFuel2 - closingFuel2) : 0;
-          let totalUsage = usage1 + usage2;
-
-          const literUsagePerHour = (operatingHours > 0) ? totalUsage / operatingHours : null;
-          const costPerLiter = 20.00;
-          const costForUsage = totalUsage * costPerLiter;
-          const durationH = operatingHours.toFixed(2);
-          const opening1 = pending.openingFuel1 ?? 'N/A';
-          const closing1 = closingFuel1 ?? 'N/A';
-          const usedL = totalUsage.toFixed(1);
-          const notes = `Engine stopped. Duration: ${durationH}h, Opening1: ${opening1}L, Closing1: ${closing1}L, Used: ${usedL}L (probe1: ${usage1.toFixed(1)}L, probe2: ${usage2.toFixed(1)}L)`;
-
-          const { error } = await supabase
-            .from('energy_rite_operating_sessions')
-            .update({
-              session_end_time: pending.engineOffTime,
-              session_status: 'COMPLETED',
-              closing_fuel_probe_1: closingFuel1,
-              closing_percentage_probe_1: closingPct1,
-              closing_fuel_probe_2: closingFuel2,
-              closing_percentage_probe_2: closingPct2,
-              operating_hours: operatingHours,
-              total_usage: totalUsage,
-              liter_usage_per_hour: literUsagePerHour,
-              cost_per_liter: costPerLiter,
-              cost_for_usage: costForUsage,
-              notes
-            })
-            .eq('id', pending.sessionId);
-
-          if (error) {
-            console.error(`[session] UPDATE ERROR: ${msg.plate}`, error.message);
-          } else {
-            console.log(`[session] CLOSE: ${msg.plate} session #${pending.sessionId} used=${usedL}L probe1=${usage1.toFixed(1)}L probe2=${usage2.toFixed(1)}L hours=${durationH}h`);
-          }
-        } else {
-          console.log(`[session] NO FUEL IN READING: ${msg.plate} — cannot close session #${pending.sessionId}`);
-        }
-
-        delete pendingSessionClose[msg.plate];
-      } catch (err) {
-        console.error(`[session] Close error: ${err.message}`);
-        delete pendingSessionClose[msg.plate];
-      }
-    }
-
-    if (fillTracking[msg.plate] && messageType === 405 && hasFuelData(decoded)) {
-      try {
-        const ft = fillTracking[msg.plate];
-        const fuel1 = decoded?.tank1?.volume ?? null;
-        const fuel2 = decoded?.tank2?.volume ?? null;
-
-        if (fuel1 != null && fuel2 != null) {
-          if (fuel1 > ft.maxFuel1) ft.maxFuel1 = fuel1;
-          if (fuel2 > ft.maxFuel2) ft.maxFuel2 = fuel2;
-
-          if (fuel1 <= ft.lastFuel1 && fuel2 <= ft.lastFuel2) {
-            ft.noIncreaseCount++;
-          } else {
-            ft.noIncreaseCount = 0;
-          }
-
-          ft.lastFuel1 = fuel1;
-          ft.lastFuel2 = fuel2;
-
-          if (ft.noIncreaseCount >= 3) {
-            const fillAmount1 = Math.max(0, ft.maxFuel1 - ft.preFuel1);
-            const fillAmount2 = Math.max(0, ft.maxFuel2 - ft.preFuel2);
-            const totalFill = fillAmount1 + fillAmount2;
-
-            if (totalFill > 0) {
-              console.log(`[fill] STABILIZED: ${msg.plate} probe1=${ft.preFuel1}→${ft.maxFuel1} (${fillAmount1.toFixed(1)}L) probe2=${ft.preFuel2}→${ft.maxFuel2} (${fillAmount2.toFixed(1)}L) total=${totalFill.toFixed(1)}L`);
-
-              const sessionDate = msg.loc_time.split(' ')[0];
-
-              const { error: fillError } = await supabase
-                .from('energy_rite_fuel_fills')
-                .insert({
-                  plate: msg.plate,
-                  fill_date: sessionDate,
-                  fuel_before: ft.preFuel1,
-                  fuel_after: ft.maxFuel1,
-                  fill_amount: totalFill,
-                  fill_percentage: null,
-                  detection_method: 'FIRMWARE_FILL',
-                  status: 'COMPLETED',
-                  fill_data: JSON.stringify({
-                    engine_off_time: ft.engineOffTime,
-                    trigger_time: ft.triggerTime,
-                    stabilized_time: msg.loc_time,
-                    pre_fuel_1: ft.preFuel1,
-                    pre_fuel_2: ft.preFuel2,
-                    max_fuel_1: ft.maxFuel1,
-                    max_fuel_2: ft.maxFuel2,
-                    fill_amount_1: fillAmount1,
-                    fill_amount_2: fillAmount2,
-                    total_fill: totalFill
-                  })
-                });
-
-              if (fillError) {
-                console.error(`[fill] INSERT ERROR: ${msg.plate}`, fillError.message);
-              } else {
-                console.log(`[fill] INSERTED: ${msg.plate} ${totalFill.toFixed(1)}L`);
-              }
-
-              try {
-                const { data: openSession } = await supabase
-                  .from('energy_rite_operating_sessions')
-                  .select('id, fill_events, fill_amount_during_session')
-                  .eq('branch', msg.plate)
-                  .eq('session_status', 'ONGOING')
-                  .order('created_at', { ascending: false })
-                  .limit(1)
-                  .single();
-
-                if (openSession) {
-                  const { error: updateErr } = await supabase
-                    .from('energy_rite_operating_sessions')
-                    .update({
-                      fill_events: (openSession.fill_events || 0) + 1,
-                      fill_amount_during_session: (openSession.fill_amount_during_session || 0) + totalFill
-                    })
-                    .eq('id', openSession.id);
-
-                  if (updateErr) {
-                    console.error(`[fill] SESSION UPDATE ERROR: ${msg.plate}`, updateErr.message);
-                  }
-                }
-              } catch (err) {
-                console.error(`[fill] Session update error: ${err.message}`);
-              }
-            }
-
-            delete fillTracking[msg.plate];
-          }
-        }
-      } catch (err) {
-        console.error(`[fill-check] Error: ${err.message}`);
-      }
-    }
+    await db.insertHistory(row);
 
     if (messageType === 405 && hasFuelData(decoded)) {
-      try {
-        await db.upsertLatest(row);
-      } catch (err) {
-        console.error(`[db] UPSERT LATEST ERROR: ${msg.plate}`, err.message);
+      await db.upsertLatest(row);
+    }
+
+    await processTheftStatus(msg);
+    await processTheftFuelReading(msg, decoded);
+  };
+
+  const trackEngineStatus = (msg) => {
+    const status = (msg.status || '').toUpperCase();
+    const plate = msg.plate;
+    if (status.includes('ENGINE OFF') || status.includes('IGNITION OFF') || status.includes('PTO OFF')) {
+      lastEngineStatus[plate] = { off: true, time: msg.loc_time };
+    } else if (status.includes('ENGINE ON') || status.includes('IGNITION ON') || status.includes('PTO ON')) {
+      lastEngineStatus[plate] = { off: false, time: msg.loc_time };
+      delete theftTracking[plate];
+    }
+  };
+
+  const isVehicleEngineOff = (plate) => {
+    const state = lastEngineStatus[plate];
+    return state && state.off;
+  };
+
+  const processTheftStatus = async (msg) => {
+    const status = (msg.status || '').toUpperCase();
+    const plate = msg.plate;
+    if (!status.includes('POSSIBLE FUEL THEFT')) return;
+    if (theftTracking[plate]) return;
+    if (!isVehicleEngineOff(plate)) {
+      console.log(`[theft] Ignored POSSIBLE FUEL THEFT for ${plate} - engine not OFF`);
+      return;
+    }
+
+    const alreadyRecorded = await db.checkTheftRecorded(plate, lastEngineStatus[plate].time);
+    if (alreadyRecorded) {
+      console.log(`[theft] Ignored POSSIBLE FUEL THEFT for ${plate} - already recorded`);
+      return;
+    }
+
+    const engineOffTime = lastEngineStatus[plate].time;
+    const readings = await db.getFuelReadingsBetween(plate, engineOffTime, msg.loc_time);
+    if (readings.length === 0) {
+      console.log(`[theft] No fuel readings found between engine off and theft status for ${plate}`);
+      return;
+    }
+
+    let highestFuel = 0;
+    let highestProbe1 = 0;
+    let highestProbe2 = 0;
+    let highestPercentage = 0;
+    let highestPct1 = 0;
+    let highestPct2 = 0;
+    let highestLocTime = null;
+
+    for (const r of readings) {
+      const p1 = r.fuel_probe_1_volume_in_tank || 0;
+      const p2 = r.fuel_probe_2_volume_in_tank || 0;
+      const combined = p1 + p2;
+      if (combined > highestFuel) {
+        highestFuel = combined;
+        highestProbe1 = p1;
+        highestProbe2 = p2;
+        highestLocTime = r.loc_time;
       }
     }
+
+    if (highestFuel <= 0) {
+      console.log(`[theft] No valid fuel baseline found for ${plate}`);
+      return;
+    }
+
+    const currentP1 = parseFloat(decoded?.tank1?.volume) || 0;
+    const currentP2 = parseFloat(decoded?.tank2?.volume) || 0;
+    const currentFuel = currentP1 + currentP2;
+
+    theftTracking[plate] = {
+      baselineFuel: highestFuel,
+      baselineProbe1: highestProbe1,
+      baselineProbe2: highestProbe2,
+      lowestFuel: currentFuel,
+      lowestProbe1: currentP1,
+      lowestProbe2: currentP2,
+      lowestLocTime: msg.loc_time,
+      consecutiveNoDecrease: 0,
+      startTime: msg.loc_time,
+      engineOffTime: engineOffTime,
+      costCode: db.getCostCode(plate)
+    };
+
+    console.log(`[theft] THEFT TRACKING STARTED: ${plate} - baseline: ${highestFuel}L at ${highestLocTime}`);
+  };
+
+  const processTheftFuelReading = async (msg, decoded) => {
+    const plate = msg.plate;
+    const tracking = theftTracking[plate];
+    if (!tracking) return;
+    if (!decoded || !hasFuelData(decoded)) return;
+
+    const currentP1 = parseFloat(decoded?.tank1?.volume) || 0;
+    const currentP2 = parseFloat(decoded?.tank2?.volume) || 0;
+    const currentFuel = currentP1 + currentP2;
+    if (currentFuel <= 0) return;
+
+    if (currentFuel < tracking.lowestFuel) {
+      tracking.lowestFuel = currentFuel;
+      tracking.lowestProbe1 = currentP1;
+      tracking.lowestProbe2 = currentP2;
+      tracking.lowestLocTime = msg.loc_time;
+      tracking.consecutiveNoDecrease = 0;
+    } else {
+      tracking.consecutiveNoDecrease++;
+    }
+
+    if (tracking.consecutiveNoDecrease >= 3) {
+      await completeTheft(plate, tracking);
+    }
+  };
+
+  const completeTheft = async (plate, tracking) => {
+    const theftAmount = tracking.baselineFuel - tracking.lowestFuel;
+    if (theftAmount < 1) {
+      console.log(`[theft] Skipping theft for ${plate} - change too small (${theftAmount.toFixed(1)}L)`);
+      delete theftTracking[plate];
+      return;
+    }
+
+    const startDate = tracking.startTime.split('T')[0];
+    const startTimeIso = new Date(tracking.startTime).toISOString();
+    const endTimeIso = tracking.lowestLocTime
+      ? new Date(tracking.lowestLocTime).toISOString()
+      : new Date().toISOString();
+    const durationSeconds = (new Date(endTimeIso).getTime() - new Date(startTimeIso).getTime()) / 1000;
+
+    try {
+      await db.insertTheftSession({
+        branch: plate,
+        company: 'WATERFORD',
+        cost_code: tracking.costCode,
+        session_date: startDate,
+        session_start_time: startTimeIso,
+        session_end_time: endTimeIso,
+        operating_hours: durationSeconds / 3600,
+        opening_fuel: tracking.baselineFuel,
+        opening_fuel_probe_1: tracking.baselineProbe1,
+        opening_fuel_probe_2: tracking.baselineProbe2,
+        opening_percentage: 0,
+        opening_percentage_probe_1: 0,
+        opening_percentage_probe_2: 0,
+        closing_fuel: tracking.lowestFuel,
+        closing_fuel_probe_1: tracking.lowestProbe1,
+        closing_fuel_probe_2: tracking.lowestProbe2,
+        closing_percentage: 0,
+        closing_percentage_probe_1: 0,
+        closing_percentage_probe_2: 0,
+        total_fill: -theftAmount,
+        session_status: 'FUEL_THEFT_COMPLETED',
+        notes: `Theft detected. Baseline: ${tracking.baselineFuel}L, Lowest: ${tracking.lowestFuel}L, Lost: ${theftAmount.toFixed(1)}L`,
+        fill_data: { engine_off_time: tracking.engineOffTime }
+      });
+
+      console.log(`[theft] THEFT RECORDED: ${plate} - ${tracking.baselineFuel}L -> ${tracking.lowestFuel}L = -${theftAmount.toFixed(1)}L`);
+    } catch (err) {
+      console.error(`[theft] Failed to record theft for ${plate}:`, err.message);
+    }
+
+    delete theftTracking[plate];
   };
 
   const scheduleReconnect = () => {
