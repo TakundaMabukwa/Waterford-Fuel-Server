@@ -123,9 +123,9 @@ const createClient = (wsUrl) => {
       await db.upsertLatest(row);
     }
 
-    await processTheftStatus(msg);
+    await processTheftStatus(msg, decoded);
     await processTheftFuelReading(msg, decoded);
-    await processFillStatus(msg);
+    await processFillStatus(msg, decoded);
     await processFillFuelReading(msg, decoded);
   };
 
@@ -146,7 +146,7 @@ const createClient = (wsUrl) => {
     return state && state.off;
   };
 
-  const processTheftStatus = async (msg) => {
+  const processTheftStatus = async (msg, decoded) => {
     const status = (msg.status || '').toUpperCase();
     const plate = msg.plate;
     if (!status.includes('POSSIBLE FUEL THEFT')) return;
@@ -291,7 +291,7 @@ const createClient = (wsUrl) => {
     delete theftTracking[plate];
   };
 
-  const processFillStatus = async (msg) => {
+  const processFillStatus = async (msg, decoded) => {
     const status = (msg.status || '').toUpperCase();
     const plate = msg.plate;
     if (!status.includes('POSSIBLE FUEL FILL')) return;

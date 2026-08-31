@@ -1,4 +1,13 @@
 const { Pool } = require('pg');
+const { createClient } = require('@supabase/supabase-js');
+
+const supabase = process.env.SUPABASE_URL && (process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY)
+  ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY)
+  : null;
+
+if (!supabase) {
+  console.warn('[db] Supabase credentials not set - fill/theft sessions will not be recorded to Supabase');
+}
 
 let pool = null;
 let initialized = false;
@@ -332,36 +341,14 @@ const checkFillRecorded = async (plate, engineOffTime) => {
 };
 
 const insertFillSession = async (session) => {
-  const sql = `
-    INSERT INTO energy_rite_operating_sessions (
-      branch, company, cost_code, session_date,
-      session_start_time, session_end_time, operating_hours,
-      opening_fuel, opening_percentage,
-      opening_fuel_probe_1, opening_fuel_probe_2,
-      opening_percentage_probe_1, opening_percentage_probe_2,
-      closing_fuel, closing_percentage,
-      closing_fuel_probe_1, closing_fuel_probe_2,
-      closing_percentage_probe_1, closing_percentage_probe_2,
-      total_fill, session_status, notes, fill_data
-    ) VALUES (
-      $1, $2, $3, $4, $5, $6, $7,
-      $8, $9, $10, $11, $12, $13,
-      $14, $15, $16, $17, $18, $19,
-      $20, $21, $22, $23
-    )
-  `;
-  await query(sql, [
-    session.branch, session.company, session.cost_code, session.session_date,
-    session.session_start_time, session.session_end_time, session.operating_hours,
-    session.opening_fuel, session.opening_percentage,
-    session.opening_fuel_probe_1, session.opening_fuel_probe_2,
-    session.opening_percentage_probe_1, session.opening_percentage_probe_2,
-    session.closing_fuel, session.closing_percentage,
-    session.closing_fuel_probe_1, session.closing_fuel_probe_2,
-    session.closing_percentage_probe_1, session.closing_percentage_probe_2,
-    session.total_fill, session.session_status, session.notes,
-    JSON.stringify(session.fill_data || {})
-  ]);
+  if (!supabase) {
+    console.error('[db] Supabase not configured - cannot insert fill session');
+    return;
+  }
+  const { error } = await supabase.from('energy_rite_operating_sessions').insert(session);
+  if (error) {
+    console.error(`[db] Supabase fill insert error: ${error.message}`);
+  }
 };
 
 const checkTheftRecorded = async (plate, engineOffTime) => {
@@ -377,36 +364,14 @@ const checkTheftRecorded = async (plate, engineOffTime) => {
 };
 
 const insertTheftSession = async (session) => {
-  const sql = `
-    INSERT INTO energy_rite_operating_sessions (
-      branch, company, cost_code, session_date,
-      session_start_time, session_end_time, operating_hours,
-      opening_fuel, opening_percentage,
-      opening_fuel_probe_1, opening_fuel_probe_2,
-      opening_percentage_probe_1, opening_percentage_probe_2,
-      closing_fuel, closing_percentage,
-      closing_fuel_probe_1, closing_fuel_probe_2,
-      closing_percentage_probe_1, closing_percentage_probe_2,
-      total_fill, session_status, notes, fill_data
-    ) VALUES (
-      $1, $2, $3, $4, $5, $6, $7,
-      $8, $9, $10, $11, $12, $13,
-      $14, $15, $16, $17, $18, $19,
-      $20, $21, $22, $23
-    )
-  `;
-  await query(sql, [
-    session.branch, session.company, session.cost_code, session.session_date,
-    session.session_start_time, session.session_end_time, session.operating_hours,
-    session.opening_fuel, session.opening_percentage,
-    session.opening_fuel_probe_1, session.opening_fuel_probe_2,
-    session.opening_percentage_probe_1, session.opening_percentage_probe_2,
-    session.closing_fuel, session.closing_percentage,
-    session.closing_fuel_probe_1, session.closing_fuel_probe_2,
-    session.closing_percentage_probe_1, session.closing_percentage_probe_2,
-    session.total_fill, session.session_status, session.notes,
-    JSON.stringify(session.fill_data || {})
-  ]);
+  if (!supabase) {
+    console.error('[db] Supabase not configured - cannot insert theft session');
+    return;
+  }
+  const { error } = await supabase.from('energy_rite_operating_sessions').insert(session);
+  if (error) {
+    console.error(`[db] Supabase theft insert error: ${error.message}`);
+  }
 };
 
 const init = async () => {
