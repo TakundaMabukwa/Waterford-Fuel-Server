@@ -6,6 +6,7 @@ const WATERFORD_URL = process.env.WATERFORD_SUPABASE_URL;
 const WATERFORD_KEY = process.env.WATERFORD_SUPABASE_SERVICE_ROLE_KEY || process.env.WATERFORD_SUPABASE_ANON_KEY;
 
 let waterfordSupabase = null;
+let cachedFuelStops = null;
 
 if (WATERFORD_URL && WATERFORD_KEY) {
   waterfordSupabase = createClient(WATERFORD_URL, WATERFORD_KEY, { auth: { persistSession: false } });
@@ -57,6 +58,7 @@ const syncFuelStops = async () => {
     }
 
     console.log(`[geozone] Synced ${synced} fuel stops from WATERFORD Supabase`);
+    cachedFuelStops = null;
     return synced;
   } catch (err) {
     console.error(`[geozone] Sync failed: ${err.message}`);
@@ -68,9 +70,13 @@ const findFuelStop = async (lat, lon) => {
   if (!lat || !lon) return null;
 
   try {
-    const { rows } = await db.query('SELECT * FROM fuel_stops WHERE coordinates IS NOT NULL');
+    if (!cachedFuelStops) {
+      const { rows } = await db.query('SELECT * FROM fuel_stops WHERE coordinates IS NOT NULL');
+      cachedFuelStops = rows;
+      console.log(`[geozone] Cached ${rows.length} fuel stops from local DB`);
+    }
 
-    for (const stop of rows) {
+    for (const stop of cachedFuelStops) {
       let polygon = stop.coordinates;
 
       if (typeof polygon === 'string') {

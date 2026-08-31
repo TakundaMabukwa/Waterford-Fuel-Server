@@ -228,10 +228,12 @@ const createClient = (wsUrl) => {
     const closingFuel = p1 + p2;
 
     const ongoing = await db.getOngoingSession(plate);
+    const openingFuel = ongoing && ongoing.opening_fuel ? ongoing.opening_fuel : 0;
     const startTime = ongoing && ongoing.session_start_time ? new Date(ongoing.session_start_time) : null;
     const endTime = engineOffLocTime ? new Date(engineOffLocTime) : new Date();
     const durationMs = startTime ? (endTime.getTime() - startTime.getTime()) : 0;
     const operatingHours = durationMs / (1000 * 60 * 60);
+    const totalUsage = openingFuel - closingFuel;
 
     await db.closeOperatingSession(sessionId, {
       session_end_time: endTime.toISOString(),
@@ -242,11 +244,12 @@ const createClient = (wsUrl) => {
       closing_percentage: 0,
       closing_percentage_probe_1: 0,
       closing_percentage_probe_2: 0,
+      total_usage: totalUsage,
       session_status: 'COMPLETED',
-      notes: `Engine off. Closing: ${closingFuel}L (p1:${p1}L p2:${p2}L)`
+      notes: `Engine off. Closing: ${closingFuel}L (p1:${p1}L p2:${p2}L). Usage: ${totalUsage.toFixed(1)}L`
     });
 
-    console.log(`[session] SESSION CLOSED: ${plate} - Closing: ${closingFuel}L, Hours: ${operatingHours.toFixed(2)} (id:${sessionId})`);
+    console.log(`[session] SESSION CLOSED: ${plate} - Closing: ${closingFuel}L, Hours: ${operatingHours.toFixed(2)}, Usage: ${totalUsage.toFixed(1)}L (id:${sessionId})`);
     delete pendingSessionClosures[plate];
   };
 

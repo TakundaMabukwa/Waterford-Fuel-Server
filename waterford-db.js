@@ -387,15 +387,19 @@ const getLowestFuelBetweenTimes = async (plate, from, to) => {
 };
 
 const checkFillRecorded = async (plate, engineOffTime) => {
-  const sql = `
-    SELECT id FROM energy_rite_operating_sessions
-    WHERE branch = $1
-      AND session_status = 'FUEL_FILL_COMPLETED'
-      AND fill_data->>'engine_off_time' = $2
-    LIMIT 1
-  `;
-  const { rows } = await query(sql, [plate, engineOffTime]);
-  return rows.length > 0;
+  if (!supabase) return false;
+  const { data, error } = await supabase
+    .from('energy_rite_operating_sessions')
+    .select('id')
+    .eq('branch', plate)
+    .eq('session_status', 'FUEL_FILL_COMPLETED')
+    .eq('fill_data->>engine_off_time', engineOffTime)
+    .limit(1);
+  if (error) {
+    console.error(`[db] checkFillRecorded error: ${error.message}`);
+    return false;
+  }
+  return data && data.length > 0;
 };
 
 const insertFillSession = async (session) => {
@@ -413,15 +417,19 @@ const insertFillSession = async (session) => {
 };
 
 const checkTheftRecorded = async (plate, engineOffTime) => {
-  const sql = `
-    SELECT id FROM energy_rite_operating_sessions
-    WHERE branch = $1
-      AND session_status = 'FUEL_THEFT_COMPLETED'
-      AND fill_data->>'engine_off_time' = $2
-    LIMIT 1
-  `;
-  const { rows } = await query(sql, [plate, engineOffTime]);
-  return rows.length > 0;
+  if (!supabase) return false;
+  const { data, error } = await supabase
+    .from('energy_rite_operating_sessions')
+    .select('id')
+    .eq('branch', plate)
+    .eq('session_status', 'FUEL_THEFT_COMPLETED')
+    .eq('fill_data->>engine_off_time', engineOffTime)
+    .limit(1);
+  if (error) {
+    console.error(`[db] checkTheftRecorded error: ${error.message}`);
+    return false;
+  }
+  return data && data.length > 0;
 };
 
 const insertTheftSession = async (session) => {
@@ -518,7 +526,7 @@ const getOngoingSession = async (plate) => {
   if (!supabase) return null;
   const { data, error } = await supabase
     .from('energy_rite_operating_sessions')
-    .select('id, session_start_time')
+    .select('id, session_start_time, opening_fuel')
     .eq('branch', plate)
     .eq('session_status', 'ONGOING')
     .order('session_start_time', { ascending: false })
