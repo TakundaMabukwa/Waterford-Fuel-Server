@@ -438,14 +438,11 @@ const createClient = (wsUrl) => {
               closing_percentage_probe_1: 0,
               closing_percentage_probe_2: 0,
               total_fill: fillAmount,
+              total_usage: 0,
+              fill_events: 1,
+              fill_amount_during_session: fillAmount,
               session_status: 'FUEL_FILL_COMPLETED',
-              notes: `Geozone fill detected at "${tracking.zoneName}". Baseline: ${tracking.baselineFuel}L, After: ${currentFuel}L, Filled: ${fillAmount.toFixed(1)}L`,
-              fill_data: {
-                engine_off_time: tracking.baselineLocTime,
-                fuel_stop_id: tracking.fuelStopId,
-                zone_name: tracking.zoneName,
-                detection_method: 'geozone'
-              }
+              notes: `Geozone fill at "${tracking.zoneName}". Baseline: ${tracking.baselineFuel}L, After: ${currentFuel}L, Filled: ${fillAmount.toFixed(1)}L | engine_off: ${tracking.baselineLocTime} | zone_id: ${tracking.fuelStopId} | detection: geozone`,
             });
 
             await db.insertGeozoneEvent({
@@ -604,10 +601,10 @@ const createClient = (wsUrl) => {
         closing_percentage: 0,
         closing_percentage_probe_1: 0,
         closing_percentage_probe_2: 0,
-        total_fill: -theftAmount,
+        total_theft: theftAmount,
+        total_usage: 0,
         session_status: 'FUEL_THEFT_COMPLETED',
-        notes: `Theft detected. Baseline: ${tracking.baselineFuel}L, Lowest: ${tracking.lowestFuel}L, Lost: ${theftAmount.toFixed(1)}L`,
-        fill_data: { engine_off_time: tracking.engineOffTime }
+        notes: `Theft detected. Baseline: ${tracking.baselineFuel}L, Lowest: ${tracking.lowestFuel}L, Lost: ${theftAmount.toFixed(1)}L | engine_off: ${tracking.engineOffTime} | detection: status trigger`,
       });
 
       console.log(`[theft] THEFT RECORDED: ${plate} - ${tracking.baselineFuel}L -> ${tracking.lowestFuel}L = -${theftAmount.toFixed(1)}L`);

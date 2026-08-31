@@ -195,10 +195,10 @@ const createTables = async () => {
       closing_percentage_probe_1 DOUBLE PRECISION,
       closing_percentage_probe_2 DOUBLE PRECISION,
       total_fill DOUBLE PRECISION DEFAULT 0,
+      total_theft DOUBLE PRECISION DEFAULT 0,
       total_usage DOUBLE PRECISION DEFAULT 0,
       session_status VARCHAR(50) DEFAULT 'ONGOING',
       notes TEXT,
-      fill_data JSONB DEFAULT '{}',
       fill_events INTEGER DEFAULT 0,
       fill_amount_during_session DOUBLE PRECISION DEFAULT 0,
       created_at TIMESTAMPTZ DEFAULT NOW()
@@ -393,7 +393,7 @@ const checkFillRecorded = async (plate, engineOffTime) => {
     .select('id')
     .eq('branch', plate)
     .eq('session_status', 'FUEL_FILL_COMPLETED')
-    .eq('fill_data->>engine_off_time', engineOffTime)
+    .eq('session_start_time', engineOffTime)
     .limit(1);
   if (error) {
     console.error(`[db] checkFillRecorded error: ${error.message}`);
@@ -423,7 +423,7 @@ const checkTheftRecorded = async (plate, engineOffTime) => {
     .select('id')
     .eq('branch', plate)
     .eq('session_status', 'FUEL_THEFT_COMPLETED')
-    .eq('fill_data->>engine_off_time', engineOffTime)
+    .eq('session_start_time', engineOffTime)
     .limit(1);
   if (error) {
     console.error(`[db] checkTheftRecorded error: ${error.message}`);

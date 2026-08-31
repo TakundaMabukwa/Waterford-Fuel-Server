@@ -118,9 +118,9 @@ async function run() {
       session_date: '2025-01-15', session_start_time: fillTime.toISOString(), session_end_time: fillTime.toISOString(),
       opening_fuel: 400.0, opening_fuel_probe_1: 180.0, opening_fuel_probe_2: 220.0,
       closing_fuel: 525.8, closing_fuel_probe_1: 240.7, closing_fuel_probe_2: 285.1,
-      total_fill: 125.8, session_status: 'FUEL_FILL_COMPLETED',
-      notes: 'Test: Geozone fill. 400L -> 525.8L = +125.8L',
-      fill_data: { engine_off_time: fillTime.toISOString(), fuel_stop_id: 2, zone_name: 'Waterford Carriers', detection_method: 'geozone' }
+      total_fill: 125.8, fill_events: 1, fill_amount_during_session: 125.8,
+      session_status: 'FUEL_FILL_COMPLETED',
+      notes: 'Test: Geozone fill. 400L -> 525.8L = +125.8L | zone: Waterford Carriers | detection: geozone'
     }).select('id');
     assert('FILL_COMPLETED inserted', !error && data && data.length > 0, error ? error.message : '');
     fillId = data?.[0]?.id;
@@ -128,8 +128,8 @@ async function run() {
     const { data: fv } = await supabase.from('energy_rite_operating_sessions').select('*').eq('id', fillId).single();
     assert('total_fill = 125.8', fv && fv.total_fill === 125.8, `got ${fv?.total_fill}`);
     assert('session_status = FUEL_FILL_COMPLETED', fv && fv.session_status === 'FUEL_FILL_COMPLETED');
-    assert('fill_data.zone_name = Waterford Carriers', fv?.fill_data?.zone_name === 'Waterford Carriers');
-    assert('fill_data.detection_method = geozone', fv?.fill_data?.detection_method === 'geozone');
+    assert('fill_events = 1', fv && fv.fill_events === 1, `got ${fv?.fill_events}`);
+    assert('notes contain zone', fv?.notes?.includes('Waterford Carriers'));
   } catch (e) { err(`TEST 4 error: ${e.message}`); }
 
   log(`\n${'='.repeat(50)}`);
@@ -143,15 +143,14 @@ async function run() {
       session_date: '2025-01-15', session_start_time: theftTime.toISOString(), session_end_time: theftTime.toISOString(),
       opening_fuel: 600.0, opening_fuel_probe_1: 300.0, opening_fuel_probe_2: 300.0,
       closing_fuel: 550.0, closing_fuel_probe_1: 275.0, closing_fuel_probe_2: 275.0,
-      total_fill: -50.0, session_status: 'FUEL_THEFT_COMPLETED',
-      notes: 'Test: Theft. 600L -> 550L = -50L',
-      fill_data: { engine_off_time: theftTime.toISOString() }
+      total_theft: 50.0, session_status: 'FUEL_THEFT_COMPLETED',
+      notes: 'Test: Theft. 600L -> 550L = -50L | detection: status trigger'
     }).select('id');
     assert('THEFT_COMPLETED inserted', !error && data && data.length > 0, error ? error.message : '');
     theftId = data?.[0]?.id;
 
     const { data: tv } = await supabase.from('energy_rite_operating_sessions').select('*').eq('id', theftId).single();
-    assert('total_fill = -50', tv && tv.total_fill === -50.0, `got ${tv?.total_fill}`);
+    assert('total_theft = 50', tv && tv.total_theft === 50.0, `got ${tv?.total_theft}`);
     assert('session_status = FUEL_THEFT_COMPLETED', tv && tv.session_status === 'FUEL_THEFT_COMPLETED');
   } catch (e) { err(`TEST 5 error: ${e.message}`); }
 
@@ -191,7 +190,7 @@ async function run() {
   log('TEST 8: Combined Verification');
   log('='.repeat(50));
   try {
-    const { data: sessions } = await supabase.from('energy_rite_operating_sessions').select('session_status, total_fill, total_usage, closing_fuel, opening_fuel').eq('branch', PLATE);
+    const { data: sessions } = await supabase.from('energy_rite_operating_sessions').select('session_status, total_fill, total_theft, total_usage, closing_fuel, opening_fuel').eq('branch', PLATE);
     const sc = {};
     (sessions || []).forEach(s => { sc[s.session_status] = (sc[s.session_status] || 0) + 1; });
     log(`  Sessions found: ${JSON.stringify(sc)}`);
