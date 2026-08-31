@@ -2,10 +2,10 @@ require('dotenv').config();
 const fs = require('fs');
 const http = require('http');
 const WebSocket = require('ws');
-const { createClient: wsClientFactory } = require('./waterford-ws-client');
+const { createClient: createWsClient } = require('./waterford-ws-client');
 const db = require('./waterford-db');
 const { decodeFuelData, hasFuelData } = require('./waterford-fuel-decoder');
-const { createClient: supabaseClient } = require('@supabase/supabase-js');
+const { createClient: createSupabaseClient } = require('@supabase/supabase-js');
 
 const LOG_FILE = require('path').join(__dirname, 'integration-test.log');
 const log = (msg) => { console.log(msg); fs.appendFileSync(LOG_FILE, msg + '\n'); };
@@ -17,8 +17,8 @@ const PLATE = 'LR78YGGP';
 const WS_PORT = 18765;
 const WS_URL = `ws://127.0.0.1:${WS_PORT}`;
 
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY);
-const waterford = createClient(process.env.WATERFORD_SUPABASE_URL, process.env.WATERFORD_SUPABASE_SERVICE_ROLE_KEY || process.env.WATERFORD_SUPABASE_ANON_KEY);
+const supabase = createSupabaseClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY);
+const waterford = createSupabaseClient(process.env.WATERFORD_SUPABASE_URL, process.env.WATERFORD_SUPABASE_SERVICE_ROLE_KEY || process.env.WATERFORD_SUPABASE_ANON_KEY);
 
 let passed = 0;
 let failed = 0;
@@ -76,7 +76,7 @@ async function run() {
     const ws = new Promise((resolve) => {
       wsServer = new WebSocket.Server({ port: WS_PORT }, () => {
         log(`  Mock WS server listening on port ${WS_PORT}`);
-        wsClient = wsClientFactory(WS_URL);
+        wsClient = createWsClient(WS_URL);
         wsClient.connect();
         resolve();
       });
