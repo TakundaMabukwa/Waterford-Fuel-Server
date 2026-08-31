@@ -99,7 +99,7 @@ const findFuelStop = async (lat, lon) => {
   }
 };
 
-const insertFuelReviewAction = async (plate, fillAmount, baselineFuel, currentFuel, locTime, zoneName) => {
+const insertFuelReviewAction = async (plate, actionType, amount, baselineFuel, currentFuel, locTime, context) => {
   if (!waterfordSupabase) {
     console.warn('[geozone] Skipping fuel_review_actions insert - no WATERFORD Supabase client');
     return;
@@ -113,13 +113,14 @@ const insertFuelReviewAction = async (plate, fillAmount, baselineFuel, currentFu
       .upsert({
         vehicle_reg: plate,
         review_date: reviewDate,
-        action_type: 'fill',
-        probe_value: `${fillAmount.toFixed(1)}L (${baselineFuel.toFixed(1)}L -> ${currentFuel.toFixed(1)}L)`,
-        notes: `loc_time: ${locTime} | zone: ${zoneName} | detection: geozone`,
+        action_type: actionType,
+        type: actionType,
+        probe_value: `${amount.toFixed(1)}L (${baselineFuel.toFixed(1)}L -> ${currentFuel.toFixed(1)}L)`,
+        notes: `loc_time: ${locTime} | ${context}`,
       }, { onConflict: 'vehicle_reg,review_date,action_type' });
 
     if (error) throw error;
-    console.log(`[geozone] fuel_review_actions logged for ${plate} on ${reviewDate}`);
+    console.log(`[geozone] fuel_review_actions logged for ${plate} on ${reviewDate} (${actionType})`);
   } catch (err) {
     console.error(`[geozone] Failed to log fuel_review_actions for ${plate}: ${err.message}`);
   }

@@ -344,7 +344,7 @@ const createClient = (wsUrl) => {
 
             console.log(`[geozone] FILL RECORDED: ${plate} at "${tracking.zoneName}" - ${tracking.baselineFuel}L -> ${currentFuel}L = +${fillAmount.toFixed(1)}L`);
 
-            await insertFuelReviewAction(plate, fillAmount, tracking.baselineFuel, currentFuel, msg.loc_time, tracking.zoneName);
+            await insertFuelReviewAction(plate, 'fill', fillAmount, tracking.baselineFuel, currentFuel, msg.loc_time, `zone: ${tracking.zoneName} | detection: geozone`);
           } catch (err) {
             console.error(`[geozone] Failed to record fill for ${plate}: ${err.message}`);
           }
@@ -492,6 +492,8 @@ const createClient = (wsUrl) => {
       });
 
       console.log(`[theft] THEFT RECORDED: ${plate} - ${tracking.baselineFuel}L -> ${tracking.lowestFuel}L = -${theftAmount.toFixed(1)}L`);
+
+      await insertFuelReviewAction(plate, 'theft', theftAmount, tracking.baselineFuel, tracking.lowestFuel, tracking.lowestLocTime, `detection: status trigger`);
     } catch (err) {
       console.error(`[theft] Failed to record theft for ${plate}:`, err.message);
     }
