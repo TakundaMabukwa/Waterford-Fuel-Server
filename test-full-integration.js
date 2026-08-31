@@ -33,13 +33,7 @@ function assert(label, condition, detail) {
 }
 
 async function cleanup() {
-  log('\n=== CLEANUP ===');
-  try {
-    const { error: e1 } = await supabase.from('energy_rite_operating_sessions').delete().eq('branch', PLATE);
-    if (e1) log(`  Cleanup sessions: ${e1.message}`); else log(`  Cleaned energy_rite_operating_sessions`);
-    const { error: e2 } = await waterford.from('fuel_review_actions').delete().eq('vehicle_reg', PLATE);
-    if (e2) log(`  Cleanup review actions: ${e2.message}`); else log(`  Cleaned fuel_review_actions`);
-  } catch (e) { log(`  Cleanup error: ${e.message}`); }
+  log('\n=== NO CLEANUP — test data retained ===');
 }
 
 async function run() {
