@@ -7,8 +7,8 @@ const db = require('./waterford-db');
 const { decodeFuelData, hasFuelData } = require('./waterford-fuel-decoder');
 const { createClient: createSupabaseClient } = require('@supabase/supabase-js');
 
-process.env.PGHOST = process.env.PGHOST || 'localhost';
-process.env.PGPORT = process.env.PGPORT_HOST || '5433';
+process.env.PGHOST = 'localhost';
+process.env.PGPORT = '5433';
 process.env.PGDATABASE = process.env.PGDATABASE || 'fuel_table';
 process.env.PGUSER = process.env.PGUSER || 'postgres';
 process.env.PGPASSWORD = process.env.PGPASSWORD || 'vik8989';
