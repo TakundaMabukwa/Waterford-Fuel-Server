@@ -47,11 +47,6 @@ const VEHICLES = {
 
 const combinedFuel = (row) => (row.fuel_probe_1_volume_in_tank || 0) + (row.fuel_probe_2_volume_in_tank || 0);
 
-const isEngineOff = (status) => {
-  const s = (status || '').toUpperCase();
-  return s.includes('ENGINE OFF') || s.includes('IGNITION OFF') || s.includes('PTO OFF');
-};
-
 const isFillStatus = (status) => {
   const s = (status || '').toUpperCase();
   return s.includes('FUEL FILL');
@@ -121,7 +116,8 @@ function extractEvent(readings, fillIndex, type) {
 
   let baselineIndex = -1;
   for (let j = fillIndex - 1; j >= 0; j--) {
-    if (isEngineOff(readings[j].status)) {
+    const fuel = combinedFuel(readings[j]);
+    if (fuel > 0) {
       baselineIndex = j;
       break;
     }
@@ -138,28 +134,29 @@ function extractEvent(readings, fillIndex, type) {
   let minIndex = baselineIndex;
 
   let endIndex = fillIndex;
-  let lastIncreasing = baselineFuel;
-  let lastDecreasing = baselineFuel;
+  let lastClimbing = baselineFuel;
+  let lastDropping = baselineFuel;
 
   for (let k = fillIndex; k < readings.length; k++) {
     const currentFuel = combinedFuel(readings[k]);
+    if (currentFuel <= 0) continue;
 
     if (type === 'fill') {
-      if (currentFuel > lastIncreasing) {
+      if (currentFuel > lastClimbing) {
         maxFuel = currentFuel;
         maxIndex = k;
-        lastIncreasing = currentFuel;
+        lastClimbing = currentFuel;
         endIndex = k;
-      } else if (currentFuel < lastIncreasing * 0.95) {
+      } else if (currentFuel < lastClimbing * 0.95) {
         break;
       }
     } else {
-      if (currentFuel < lastDecreasing) {
+      if (currentFuel < lastDropping) {
         minFuel = currentFuel;
         minIndex = k;
-        lastDecreasing = currentFuel;
+        lastDropping = currentFuel;
         endIndex = k;
-      } else if (currentFuel > lastDecreasing * 1.05) {
+      } else if (currentFuel > lastDropping * 1.05) {
         break;
       }
     }
@@ -168,7 +165,7 @@ function extractEvent(readings, fillIndex, type) {
   const amount = type === 'fill' ? maxFuel - baselineFuel : baselineFuel - minFuel;
   if (amount <= 0) return null;
 
-  const engineOffRow = readings[baselineIndex];
+  const baselineRow = readings[baselineIndex];
   const resultRow = type === 'fill' ? readings[maxIndex] : readings[minIndex];
 
   return {
@@ -176,15 +173,15 @@ function extractEvent(readings, fillIndex, type) {
     type,
     amount,
     baselineFuel,
-    baselineTime: engineOffRow.loc_time || engineOffRow.created_at,
+    baselineTime: baselineRow.loc_time || baselineRow.created_at,
     resultFuel: type === 'fill' ? maxFuel : minFuel,
     resultTime: resultRow.loc_time || resultRow.created_at,
     fillTime: fillRow.loc_time || fillRow.created_at,
     lat: fillRow.latitude,
     lon: fillRow.longitude,
     endIndex,
-    baselineP1: engineOffRow.fuel_probe_1_volume_in_tank || 0,
-    baselineP2: engineOffRow.fuel_probe_2_volume_in_tank || 0,
+    baselineP1: baselineRow.fuel_probe_1_volume_in_tank || 0,
+    baselineP2: baselineRow.fuel_probe_2_volume_in_tank || 0,
     resultP1: type === 'fill' ? (readings[maxIndex].fuel_probe_1_volume_in_tank || 0) : (readings[minIndex].fuel_probe_1_volume_in_tank || 0),
     resultP2: type === 'fill' ? (readings[maxIndex].fuel_probe_2_volume_in_tank || 0) : (readings[minIndex].fuel_probe_2_volume_in_tank || 0),
   };
@@ -232,7 +229,7 @@ async function insertToSupabase(event) {
     closing_percentage_probe_1: 0,
     closing_percentage_probe_2: 0,
     session_status: sessionStatus,
-    notes: `Backfill: ${isFill ? 'Fill' : 'Theft'} detected. ENGINE OFF at ${event.baselineTime}, ${sessionStatus} at ${event.fillTime}. Baseline: ${event.baselineFuel}L, ${isFill ? 'Max' : 'Min'}: ${event.resultFuel}L, ${isFill ? 'Filled' : 'Lost'}: ${event.amount.toFixed(1)}L`,
+    notes: `Backfill: ${isFill ? 'Fill' : 'Theft'} detected. Last reading at ${event.baselineTime}, ${sessionStatus} at ${event.fillTime}. Baseline: ${event.baselineFuel}L, ${isFill ? 'Max' : 'Min'}: ${event.resultFuel}L, ${isFill ? 'Filled' : 'Lost'}: ${event.amount.toFixed(1)}L`,
   };
 
   if (isFill) {
@@ -270,7 +267,7 @@ async function insertToSupabase(event) {
       action_type: 'fill',
       type: 'fill',
       probe_value: `${event.amount.toFixed(1)}L (${event.baselineFuel.toFixed(1)}L -> ${event.resultFuel.toFixed(1)}L)`,
-      notes: `Backfill: ENGINE OFF at ${event.baselineTime} | fill detected at ${event.fillTime}`,
+      notes: `Backfill: last reading at ${event.baselineTime} | fill detected at ${event.fillTime}`,
     }, { onConflict: 'vehicle_reg,review_date,action_type' });
     if (error) console.error(`  [error] WATERFORD fuel_review_actions fill: ${error.message}`);
   }
@@ -282,7 +279,7 @@ async function insertToSupabase(event) {
       action_type: 'theft',
       type: 'theft',
       probe_value: `${event.amount.toFixed(1)}L (${event.baselineFuel.toFixed(1)}L -> ${event.resultFuel.toFixed(1)}L)`,
-      notes: `Backfill: ENGINE OFF at ${event.baselineTime} | theft detected at ${event.fillTime}`,
+      notes: `Backfill: last reading at ${event.baselineTime} | theft detected at ${event.fillTime}`,
     }, { onConflict: 'vehicle_reg,review_date,action_type' });
     if (error) console.error(`  [error] WATERFORD fuel_review_actions theft: ${error.message}`);
   }
