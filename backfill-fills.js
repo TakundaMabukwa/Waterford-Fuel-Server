@@ -7,6 +7,9 @@ const DRY_RUN = !process.argv.includes('--execute');
 const DATE_FROM = '2026-07-01';
 const DATE_TO = '2026-08-31';
 
+process.env.PGHOST = 'localhost';
+process.env.PGPORT = process.env.PGPORT_HOST || '5433';
+
 const pool = new Pool({
   host: process.env.PGHOST || 'localhost',
   port: parseInt(process.env.PGPORT || '5432', 10),
