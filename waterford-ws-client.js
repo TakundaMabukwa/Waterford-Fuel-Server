@@ -11,6 +11,7 @@ const createClient = (wsUrl) => {
   const theftTracking = {};
   const lastEngineStatus = {};
   const geozoneTracking = {};
+  const pendingSessionClosures = {};
 
   const parseMessage = (raw) => {
     if (!raw || raw.length < 3) return null;
@@ -125,6 +126,7 @@ const createClient = (wsUrl) => {
     await processTheftStatus(msg, decoded);
     await processTheftFuelReading(msg, decoded);
     await processGeozone(msg, decoded);
+    await handleSessionEvents(msg, decoded);
   };
 
   const trackEngineStatus = (msg) => {
@@ -136,6 +138,15 @@ const createClient = (wsUrl) => {
       lastEngineStatus[plate] = { off: false, time: msg.loc_time };
       delete theftTracking[plate];
     }
+  };
+
+  const handleSessionEvents = async (msg, decoded) => {
+    if (isEngineOn(msg)) {
+      await openSession(msg);
+    } else if (isEngineOff(msg)) {
+      await closeSession(msg);
+    }
+    await tryClosePendingSession(msg, decoded);
   };
 
   const isVehicleEngineOff = (plate) => {
@@ -151,6 +162,111 @@ const createClient = (wsUrl) => {
   const isEngineOff = (msg) => {
     const status = (msg.status || '').toUpperCase();
     return status.includes('ENGINE OFF') || status.includes('IGNITION OFF') || status.includes('PTO OFF');
+  };
+
+  const openSession = async (msg) => {
+    const plate = msg.plate;
+
+    const existing = await db.getOngoingSession(plate);
+    if (existing) return;
+
+    const lastFuel = await db.getLatestFuelBefore(plate, msg.loc_time);
+
+    const p1 = lastFuel ? (lastFuel.fuel_probe_1_volume_in_tank || 0) : 0;
+    const p2 = lastFuel ? (lastFuel.fuel_probe_2_volume_in_tank || 0) : 0;
+    const combined = p1 + p2;
+    const pct1 = lastFuel && lastFuel.fuel_probe_1_level_percentage != null ? lastFuel.fuel_probe_1_level_percentage : 0;
+    const pct2 = lastFuel && lastFuel.fuel_probe_2_level_percentage != null ? lastFuel.fuel_probe_2_level_percentage : 0;
+
+    const sessionDate = msg.loc_time ? msg.loc_time.split('T')[0] : new Date().toISOString().split('T')[0];
+    const startTime = msg.loc_time ? new Date(msg.loc_time).toISOString() : new Date().toISOString();
+
+    const sessionId = await db.insertOperatingSession({
+      branch: plate,
+      company: 'WATERFORD',
+      cost_code: db.getCostCode(plate),
+      session_date: sessionDate,
+      session_start_time: startTime,
+      opening_fuel: combined,
+      opening_fuel_probe_1: p1,
+      opening_fuel_probe_2: p2,
+      opening_percentage: 0,
+      opening_percentage_probe_1: pct1,
+      opening_percentage_probe_2: pct2,
+      session_status: 'ONGOING',
+      notes: `Engine started. Opening: ${combined}L (p1:${p1}L p2:${p2}L)`
+    });
+
+    if (sessionId) {
+      console.log(`[session] ENGINE ON: ${plate} - Opening: ${combined}L (id:${sessionId})`);
+    }
+  };
+
+  const closeSession = async (msg) => {
+    const plate = msg.plate;
+
+    const ongoing = await db.getOngoingSession(plate);
+    if (!ongoing) return;
+
+    const firstFuel = await db.getLatestFuelAfter(plate, msg.loc_time);
+
+    if (firstFuel) {
+      await completeSessionClose(ongoing.id, plate, firstFuel, msg.loc_time);
+    } else {
+      pendingSessionClosures[plate] = {
+        sessionId: ongoing.id,
+        locTime: msg.loc_time,
+        timestamp: Date.now()
+      };
+      console.log(`[session] ENGINE OFF: ${plate} - waiting for fuel reading to close`);
+    }
+  };
+
+  const completeSessionClose = async (sessionId, plate, fuelRow, engineOffLocTime) => {
+    const p1 = fuelRow.fuel_probe_1_volume_in_tank || 0;
+    const p2 = fuelRow.fuel_probe_2_volume_in_tank || 0;
+    const closingFuel = p1 + p2;
+
+    const ongoing = await db.getOngoingSession(plate);
+    const startTime = ongoing && ongoing.session_start_time ? new Date(ongoing.session_start_time) : null;
+    const endTime = engineOffLocTime ? new Date(engineOffLocTime) : new Date();
+    const durationMs = startTime ? (endTime.getTime() - startTime.getTime()) : 0;
+    const operatingHours = durationMs / (1000 * 60 * 60);
+
+    await db.closeOperatingSession(sessionId, {
+      session_end_time: endTime.toISOString(),
+      operating_hours: operatingHours,
+      closing_fuel: closingFuel,
+      closing_fuel_probe_1: p1,
+      closing_fuel_probe_2: p2,
+      closing_percentage: 0,
+      closing_percentage_probe_1: 0,
+      closing_percentage_probe_2: 0,
+      session_status: 'COMPLETED',
+      notes: `Engine off. Closing: ${closingFuel}L (p1:${p1}L p2:${p2}L)`
+    });
+
+    console.log(`[session] SESSION CLOSED: ${plate} - Closing: ${closingFuel}L, Hours: ${operatingHours.toFixed(2)} (id:${sessionId})`);
+    delete pendingSessionClosures[plate];
+  };
+
+  const tryClosePendingSession = async (msg, decoded) => {
+    const plate = msg.plate;
+    const pending = pendingSessionClosures[plate];
+    if (!pending) return;
+    if (!decoded || !hasFuelData(decoded)) return;
+
+    const p1 = parseFloat(decoded?.tank1?.volume) || 0;
+    const p2 = parseFloat(decoded?.tank2?.volume) || 0;
+    const closingFuel = p1 + p2;
+    if (closingFuel <= 0) return;
+
+    await completeSessionClose(pending.sessionId, plate, {
+      fuel_probe_1_volume_in_tank: p1,
+      fuel_probe_2_volume_in_tank: p2,
+      fuel_probe_1_level_percentage: parseFloat(decoded?.tank1?.percentage) || 0,
+      fuel_probe_2_level_percentage: parseFloat(decoded?.tank2?.percentage) || 0,
+    }, pending.locTime);
   };
 
   const getCombinedFuel = (decoded) => {

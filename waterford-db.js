@@ -514,6 +514,79 @@ const getLastNFuelReadings = async (plate, count) => {
   return rows.reverse();
 };
 
+const getOngoingSession = async (plate) => {
+  if (!supabase) return null;
+  const { data, error } = await supabase
+    .from('energy_rite_operating_sessions')
+    .select('id, session_start_time')
+    .eq('branch', plate)
+    .eq('session_status', 'ONGOING')
+    .order('session_start_time', { ascending: false })
+    .limit(1);
+  if (error) {
+    console.error(`[db] getOngoingSession error: ${error.message}`);
+    return null;
+  }
+  return data && data.length > 0 ? data[0] : null;
+};
+
+const insertOperatingSession = async (session) => {
+  if (!supabase) {
+    console.error('[db] *** BLOCKED: Supabase not configured - cannot insert session ***');
+    return null;
+  }
+  const { data, error } = await supabase.from('energy_rite_operating_sessions').insert(session).select('id');
+  if (error) {
+    console.error(`[db] Supabase session insert FAILED: ${error.message}`);
+    console.error(`[db] Details: ${error.details || 'none'} | hint: ${error.hint || 'none'} | code: ${error.code || 'none'}`);
+    return null;
+  }
+  return data && data.length > 0 ? data[0].id : null;
+};
+
+const closeOperatingSession = async (sessionId, closingData) => {
+  if (!supabase) {
+    console.error('[db] *** BLOCKED: Supabase not configured - cannot close session ***');
+    return;
+  }
+  const { error } = await supabase.from('energy_rite_operating_sessions')
+    .update(closingData)
+    .eq('id', sessionId);
+  if (error) {
+    console.error(`[db] Supabase session close FAILED: ${error.message}`);
+    console.error(`[db] Details: ${error.details || 'none'} | hint: ${error.hint || 'none'} | code: ${error.code || 'none'}`);
+  }
+};
+
+const getLatestFuelBefore = async (plate, locTime) => {
+  const sql = `
+    SELECT fuel_probe_1_volume_in_tank, fuel_probe_2_volume_in_tank,
+           fuel_probe_1_level_percentage, fuel_probe_2_level_percentage, loc_time
+    FROM vehicle_history
+    WHERE plate = $1
+      AND loc_time < $2
+      AND (fuel_probe_1_volume_in_tank > 0 OR fuel_probe_2_volume_in_tank > 0)
+    ORDER BY created_at DESC
+    LIMIT 1
+  `;
+  const { rows } = await query(sql, [plate, locTime]);
+  return rows.length > 0 ? rows[0] : null;
+};
+
+const getLatestFuelAfter = async (plate, locTime) => {
+  const sql = `
+    SELECT fuel_probe_1_volume_in_tank, fuel_probe_2_volume_in_tank, loc_time
+    FROM vehicle_history
+    WHERE plate = $1
+      AND loc_time >= $2
+      AND (fuel_probe_1_volume_in_tank > 0 OR fuel_probe_2_volume_in_tank > 0)
+    ORDER BY created_at ASC
+    LIMIT 1
+  `;
+  const { rows } = await query(sql, [plate, locTime]);
+  return rows.length > 0 ? rows[0] : null;
+};
+
 const init = async () => {
   if (initialized) return;
   await waitForDatabase();
@@ -537,5 +610,7 @@ module.exports = {
   getFuelReadingsBetween, getRecentFuelReadings,
   checkFillRecorded, insertFillSession,
   checkTheftRecorded, insertTheftSession,
-  upsertFuelStop, insertGeozoneEvent, getLowestFuelFromTime, getLastNFuelReadings
+  upsertFuelStop, insertGeozoneEvent, getLowestFuelFromTime, getLastNFuelReadings,
+  getOngoingSession, insertOperatingSession, closeOperatingSession,
+  getLatestFuelBefore, getLatestFuelAfter
 };
