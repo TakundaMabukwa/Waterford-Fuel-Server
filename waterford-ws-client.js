@@ -1,7 +1,7 @@
 const WebSocket = require('ws');
 const { decodeFuelData, hasFuelData } = require('./waterford-fuel-decoder');
 const db = require('./waterford-db');
-const { findFuelStop } = require('./waterford-geozone');
+const { findFuelStop, insertFuelReviewAction } = require('./waterford-geozone');
 
 const createClient = (wsUrl) => {
   let ws = null;
@@ -343,6 +343,8 @@ const createClient = (wsUrl) => {
             });
 
             console.log(`[geozone] FILL RECORDED: ${plate} at "${tracking.zoneName}" - ${tracking.baselineFuel}L -> ${currentFuel}L = +${fillAmount.toFixed(1)}L`);
+
+            await insertFuelReviewAction(plate, fillAmount, tracking.baselineFuel, currentFuel, msg.loc_time, tracking.zoneName);
           } catch (err) {
             console.error(`[geozone] Failed to record fill for ${plate}: ${err.message}`);
           }
