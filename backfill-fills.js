@@ -57,54 +57,42 @@ const isTheftStatus = (status) => {
   return s.includes('FUEL THEFT');
 };
 
-const hasFuel = (row) => (row.fuel_probe_1_volume_in_tank > 0 || row.fuel_probe_2_volume_in_tank > 0);
-
-async function loadVehicleHistory() {
-  console.log(`[backfill] Loading vehicle history from ${DATE_FROM} to ${DATE_TO}...`);
+async function loadPlateHistory(plate) {
   const { rows } = await pool.query(`
     SELECT id, plate, loc_time, status,
       fuel_probe_1_volume_in_tank, fuel_probe_2_volume_in_tank,
       latitude, longitude, created_at
     FROM vehicle_history
-    WHERE created_at >= $1 AND created_at <= $2
+    WHERE plate = $1 AND created_at >= $2 AND created_at <= $3
       AND (fuel_probe_1_volume_in_tank > 0 OR fuel_probe_2_volume_in_tank > 0)
-    ORDER BY plate, created_at ASC
-  `, [DATE_FROM, DATE_TO + ' 23:59:59']);
-  console.log(`[backfill] Loaded ${rows.length} rows`);
+    ORDER BY created_at ASC
+  `, [plate, DATE_FROM, DATE_TO + ' 23:59:59']);
   return rows;
 }
 
-function detectEvents(rows) {
+function detectEvents(readings) {
   const fills = [];
   const thefts = [];
 
-  const byPlate = {};
-  for (const row of rows) {
-    if (!byPlate[row.plate]) byPlate[row.plate] = [];
-    byPlate[row.plate].push(row);
-  }
+  let i = 0;
+  while (i < readings.length) {
+    const row = readings[i];
 
-  for (const [plate, readings] of Object.entries(byPlate)) {
-    let i = 0;
-    while (i < readings.length) {
-      const row = readings[i];
-
-      if (isFillStatus(row.status)) {
-        const event = extractEvent(readings, i, 'fill');
-        if (event) fills.push(event);
-        if (event) i = event.endIndex + 1; else i++;
-        continue;
-      }
-
-      if (isTheftStatus(row.status)) {
-        const event = extractEvent(readings, i, 'theft');
-        if (event) thefts.push(event);
-        if (event) i = event.endIndex + 1; else i++;
-        continue;
-      }
-
-      i++;
+    if (isFillStatus(row.status)) {
+      const event = extractEvent(readings, i, 'fill');
+      if (event) fills.push(event);
+      if (event) i = event.endIndex + 1; else i++;
+      continue;
     }
+
+    if (isTheftStatus(row.status)) {
+      const event = extractEvent(readings, i, 'theft');
+      if (event) thefts.push(event);
+      if (event) i = event.endIndex + 1; else i++;
+      continue;
+    }
+
+    i++;
   }
 
   return { fills, thefts };
@@ -245,44 +233,34 @@ async function insertToSupabase(event) {
   const dup = await checkDuplicate(event.plate, sessionDate, sessionStatus);
   if (dup) {
     console.log(`  [skip] Duplicate: ${event.plate} ${sessionDate} ${sessionStatus}`);
-    return;
+    return false;
   }
 
-  if (DRY_RUN) return;
+  if (DRY_RUN) return true;
 
   if (firstSupabase) {
     const { error } = await firstSupabase.from('energy_rite_operating_sessions').insert(session);
-    if (error) console.error(`  [error] First Supabase insert: ${error.message}`);
+    if (error) { console.error(`  [error] First Supabase: ${error.message}`); return false; }
   }
 
   if (waterfordSupabase) {
     const { error } = await waterfordSupabase.from('energy_rite_operating_sessions').insert(session);
-    if (error) console.error(`  [error] WATERFORD Supabase insert: ${error.message}`);
+    if (error) { console.error(`  [error] WATERFORD sessions: ${error.message}`); return false; }
   }
 
-  if (waterfordSupabase && isFill) {
+  if (waterfordSupabase) {
     const { error } = await waterfordSupabase.from('fuel_review_actions').upsert({
       vehicle_reg: event.plate,
       review_date: sessionDate,
-      action_type: 'fill',
-      type: 'fill',
+      action_type: isFill ? 'fill' : 'theft',
+      type: isFill ? 'fill' : 'theft',
       probe_value: `${event.amount.toFixed(1)}L (${event.baselineFuel.toFixed(1)}L -> ${event.resultFuel.toFixed(1)}L)`,
-      notes: `Backfill: last reading at ${event.baselineTime} | fill detected at ${event.fillTime}`,
+      notes: `Backfill: last reading at ${event.baselineTime} | ${isFill ? 'fill' : 'theft'} detected at ${event.fillTime}`,
     }, { onConflict: 'vehicle_reg,review_date,action_type' });
-    if (error) console.error(`  [error] WATERFORD fuel_review_actions fill: ${error.message}`);
+    if (error) console.error(`  [error] WATERFORD fuel_review_actions: ${error.message}`);
   }
 
-  if (waterfordSupabase && !isFill) {
-    const { error } = await waterfordSupabase.from('fuel_review_actions').upsert({
-      vehicle_reg: event.plate,
-      review_date: sessionDate,
-      action_type: 'theft',
-      type: 'theft',
-      probe_value: `${event.amount.toFixed(1)}L (${event.baselineFuel.toFixed(1)}L -> ${event.resultFuel.toFixed(1)}L)`,
-      notes: `Backfill: last reading at ${event.baselineTime} | theft detected at ${event.fillTime}`,
-    }, { onConflict: 'vehicle_reg,review_date,action_type' });
-    if (error) console.error(`  [error] WATERFORD fuel_review_actions theft: ${error.message}`);
-  }
+  return true;
 }
 
 async function run() {
@@ -292,50 +270,55 @@ async function run() {
   console.log(`First Supabase: ${firstSupabase ? 'connected' : 'NOT configured'}`);
   console.log(`WATERFORD Supabase: ${waterfordSupabase ? 'connected' : 'NOT configured'}`);
 
-  const rows = await loadVehicleHistory();
-  const { fills, thefts } = detectEvents(rows);
+  const { rows: plates } = await pool.query(`
+    SELECT DISTINCT plate FROM vehicle_history
+    WHERE created_at >= $1 AND created_at <= $2
+      AND (fuel_probe_1_volume_in_tank > 0 OR fuel_probe_2_volume_in_tank > 0)
+    ORDER BY plate ASC
+  `, [DATE_FROM, DATE_TO + ' 23:59:59']);
 
-  console.log(`\nDetected: ${fills.length} fills, ${thefts.length} thefts\n`);
+  console.log(`\nProcessing ${plates.length} vehicles...\n`);
 
-  console.log('-'.repeat(70));
-  console.log('FILLS');
-  console.log('-'.repeat(70));
-  console.log('Plate      | Fill Time         | Engine Off Time   | Baseline | Max     | Filled');
-  console.log('-'.repeat(70));
+  let totalFills = 0, totalThefts = 0, totalFilled = 0, totalLost = 0;
+  let inserted = 0, skipped = 0;
 
-  let totalFilled = 0;
-  for (const f of fills) {
-    const ft = String(f.fillTime).substring(0, 16).replace('T', ' ');
-    const bt = String(f.baselineTime).substring(0, 16).replace('T', ' ');
-    console.log(
-      `${f.plate.padEnd(10)} | ${ft.padEnd(17)} | ${bt.padEnd(17)} | ${(f.baselineFuel.toFixed(1) + 'L').padStart(8)} | ${(f.resultFuel.toFixed(1) + 'L').padStart(7)} | ${(f.amount.toFixed(1) + 'L').padStart(7)}`
-    );
-    totalFilled += f.amount;
-    await insertToSupabase(f);
-  }
+  for (const { plate } of plates) {
+    const readings = await loadPlateHistory(plate);
+    if (readings.length === 0) continue;
 
-  console.log('-'.repeat(70));
-  console.log('THEFTS');
-  console.log('-'.repeat(70));
-  console.log('Plate      | Theft Time        | Engine Off Time   | Baseline | Min     | Lost');
-  console.log('-'.repeat(70));
+    const { fills, thefts } = detectEvents(readings);
 
-  let totalLost = 0;
-  for (const t of thefts) {
-    const ft = String(t.fillTime).substring(0, 16).replace('T', ' ');
-    const bt = String(t.baselineTime).substring(0, 16).replace('T', ' ');
-    console.log(
-      `${t.plate.padEnd(10)} | ${ft.padEnd(17)} | ${bt.padEnd(17)} | ${(t.baselineFuel.toFixed(1) + 'L').padStart(8)} | ${(t.resultFuel.toFixed(1) + 'L').padStart(7)} | ${(t.amount.toFixed(1) + 'L').padStart(7)}`
-    );
-    totalLost += t.amount;
-    await insertToSupabase(t);
+    for (const f of fills) {
+      const ft = String(f.fillTime).substring(0, 16).replace('T', ' ');
+      const bt = String(f.baselineTime).substring(0, 16).replace('T', ' ');
+      console.log(
+        `[FILL]  ${f.plate} | ${ft} | ${bt} | ${f.baselineFuel.toFixed(1)}L -> ${f.resultFuel.toFixed(1)}L | +${f.amount.toFixed(1)}L`
+      );
+      totalFills++;
+      totalFilled += f.amount;
+      const ok = await insertToSupabase(f);
+      if (ok) inserted++; else skipped++;
+    }
+
+    for (const t of thefts) {
+      const ft = String(t.fillTime).substring(0, 16).replace('T', ' ');
+      const bt = String(t.baselineTime).substring(0, 16).replace('T', ' ');
+      console.log(
+        `[THEFT] ${t.plate} | ${ft} | ${bt} | ${t.baselineFuel.toFixed(1)}L -> ${t.resultFuel.toFixed(1)}L | -${t.amount.toFixed(1)}L`
+      );
+      totalThefts++;
+      totalLost += t.amount;
+      const ok = await insertToSupabase(t);
+      if (ok) inserted++; else skipped++;
+    }
   }
 
   console.log('\n' + '='.repeat(70));
   console.log('SUMMARY');
   console.log('='.repeat(70));
-  console.log(`Fills:  ${fills.length} events, ${totalFilled.toFixed(1)}L total fuel added`);
-  console.log(`Thefts: ${thefts.length} events, ${totalLost.toFixed(1)}L total fuel lost`);
+  console.log(`Fills:  ${totalFills} events, ${totalFilled.toFixed(1)}L total fuel added`);
+  console.log(`Thefts: ${totalThefts} events, ${totalLost.toFixed(1)}L total fuel lost`);
+  console.log(`Inserted: ${inserted}, Skipped: ${skipped}`);
   console.log(`Mode:   ${DRY_RUN ? 'DRY RUN (no inserts)' : 'EXECUTED (inserted to Supabase)'}`);
   console.log('='.repeat(70) + '\n');
 
