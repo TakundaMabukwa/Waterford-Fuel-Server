@@ -244,11 +244,6 @@ async function insertToSupabase(event) {
   }
 
   if (waterfordSupabase) {
-    const { error } = await waterfordSupabase.from('energy_rite_operating_sessions').insert(session);
-    if (error) { console.error(`  [error] WATERFORD sessions: ${error.message}`); return false; }
-  }
-
-  if (waterfordSupabase) {
     const { error } = await waterfordSupabase.from('fuel_review_actions').upsert({
       vehicle_reg: event.plate,
       review_date: sessionDate,
