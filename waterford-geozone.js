@@ -79,9 +79,10 @@ const findFuelStop = async (lat, lon) => {
 
       if (!Array.isArray(polygon) || polygon.length < 3) continue;
 
+      const closedRing = [...polygon, polygon[0]];
       const turfPolygon = {
         type: 'Feature',
-        geometry: { type: 'Polygon', coordinates: [polygon] },
+        geometry: { type: 'Polygon', coordinates: [closedRing] },
         properties: {}
       };
 
@@ -114,7 +115,6 @@ const insertFuelReviewAction = async (plate, actionType, amount, baselineFuel, c
         vehicle_reg: plate,
         review_date: reviewDate,
         action_type: actionType,
-        type: actionType,
         probe_value: `${amount.toFixed(1)}L (${baselineFuel.toFixed(1)}L -> ${currentFuel.toFixed(1)}L)`,
         notes: `loc_time: ${locTime} | ${context}`,
       }, { onConflict: 'vehicle_reg,review_date,action_type' });
