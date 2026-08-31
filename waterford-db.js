@@ -203,6 +203,62 @@ const createTables = async () => {
     )
   `);
 
+  await query(`
+    CREATE TABLE IF NOT EXISTS fuel_stops (
+      id BIGINT PRIMARY KEY,
+      name TEXT,
+      coordinates JSONB,
+      geozone_name TEXT,
+      geozone_coordinates JSONB,
+      location_coordinates JSONB,
+      radius NUMERIC(10,2) DEFAULT 100,
+      type TEXT DEFAULT 'warehouse',
+      address TEXT,
+      city TEXT,
+      state TEXT,
+      country TEXT,
+      contact_person TEXT,
+      contact_phone TEXT,
+      operating_hours TEXT,
+      capacity TEXT,
+      notes TEXT,
+      prescribed_value NUMERIC,
+      synced_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+
+  await query(`
+    CREATE TABLE IF NOT EXISTS geozone_events (
+      id BIGSERIAL PRIMARY KEY,
+      plate VARCHAR(50) NOT NULL,
+      fuel_stop_id BIGINT REFERENCES fuel_stops(id),
+      geozone_name TEXT,
+      event_type VARCHAR(20) NOT NULL,
+      loc_time TEXT,
+      latitude DOUBLE PRECISION,
+      longitude DOUBLE PRECISION,
+      fuel_before DOUBLE PRECISION,
+      fuel_after DOUBLE PRECISION,
+      fill_amount DOUBLE PRECISION,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+
+  await query(`
+    CREATE INDEX IF NOT EXISTS idx_geozone_events_plate
+      ON geozone_events (plate, created_at DESC)
+  `);
+
+  await query(`
+    CREATE INDEX IF NOT EXISTS idx_geozone_events_type
+      ON geozone_events (event_type)
+  `);
+
+  await query(`
+    CREATE INDEX IF NOT EXISTS idx_fuel_stops_name
+      ON fuel_stops (name)
+  `);
+
   console.log('[db] Tables ready');
 };
 
@@ -374,6 +430,82 @@ const insertTheftSession = async (session) => {
   }
 };
 
+const upsertFuelStop = async (stop) => {
+  const sql = `
+    INSERT INTO fuel_stops (id, name, coordinates, geozone_name, geozone_coordinates,
+      location_coordinates, radius, type, address, city, state, country,
+      contact_person, contact_phone, operating_hours, capacity, notes, prescribed_value, synced_at)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18, NOW())
+    ON CONFLICT (id) DO UPDATE SET
+      name = EXCLUDED.name,
+      coordinates = EXCLUDED.coordinates,
+      geozone_name = EXCLUDED.geozone_name,
+      geozone_coordinates = EXCLUDED.geozone_coordinates,
+      location_coordinates = EXCLUDED.location_coordinates,
+      radius = EXCLUDED.radius,
+      type = EXCLUDED.type,
+      address = EXCLUDED.address,
+      city = EXCLUDED.city,
+      state = EXCLUDED.state,
+      country = EXCLUDED.country,
+      contact_person = EXCLUDED.contact_person,
+      contact_phone = EXCLUDED.contact_phone,
+      operating_hours = EXCLUDED.operating_hours,
+      capacity = EXCLUDED.capacity,
+      notes = EXCLUDED.notes,
+      prescribed_value = EXCLUDED.prescribed_value,
+      synced_at = NOW()
+  `;
+  await query(sql, [
+    stop.id, stop.name, JSON.stringify(stop.coordinates),
+    stop.geozone_name, JSON.stringify(stop.geozone_coordinates),
+    JSON.stringify(stop.location_coordinates), stop.radius, stop.type,
+    stop.address, stop.city, stop.state, stop.country,
+    stop.contact_person, stop.contact_phone, stop.operating_hours,
+    stop.capacity, stop.notes, stop.prescribed_value
+  ]);
+};
+
+const insertGeozoneEvent = async (event) => {
+  const sql = `
+    INSERT INTO geozone_events (plate, fuel_stop_id, geozone_name, event_type,
+      loc_time, latitude, longitude, fuel_before, fuel_after, fill_amount)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+  `;
+  await query(sql, [
+    event.plate, event.fuel_stop_id, event.geozone_name, event.event_type,
+    event.loc_time, event.latitude, event.longitude,
+    event.fuel_before, event.fuel_after, event.fill_amount
+  ]);
+};
+
+const getLowestFuelFromTime = async (plate, locTime) => {
+  const sql = `
+    SELECT fuel_probe_1_volume_in_tank, fuel_probe_2_volume_in_tank, loc_time, created_at
+    FROM vehicle_history
+    WHERE plate = $1
+      AND loc_time >= $2
+      AND (fuel_probe_1_volume_in_tank > 0 OR fuel_probe_2_volume_in_tank > 0)
+    ORDER BY (COALESCE(fuel_probe_1_volume_in_tank, 0) + COALESCE(fuel_probe_2_volume_in_tank, 0)) ASC
+    LIMIT 1
+  `;
+  const { rows } = await query(sql, [plate, locTime]);
+  return rows.length > 0 ? rows[0] : null;
+};
+
+const getLastNFuelReadings = async (plate, count) => {
+  const sql = `
+    SELECT fuel_probe_1_volume_in_tank, fuel_probe_2_volume_in_tank, loc_time, created_at
+    FROM vehicle_history
+    WHERE plate = $1
+      AND (fuel_probe_1_volume_in_tank > 0 OR fuel_probe_2_volume_in_tank > 0)
+    ORDER BY created_at DESC
+    LIMIT $2
+  `;
+  const { rows } = await query(sql, [plate, count]);
+  return rows.reverse();
+};
+
 const init = async () => {
   if (initialized) return;
   await waitForDatabase();
@@ -396,5 +528,6 @@ module.exports = {
   getLastEngineOffBefore, getHighestFuelBetweenTimes, getLowestFuelBetweenTimes,
   getFuelReadingsBetween, getRecentFuelReadings,
   checkFillRecorded, insertFillSession,
-  checkTheftRecorded, insertTheftSession
+  checkTheftRecorded, insertTheftSession,
+  upsertFuelStop, insertGeozoneEvent, getLowestFuelFromTime, getLastNFuelReadings
 };

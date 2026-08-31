@@ -1,6 +1,7 @@
 const WebSocket = require('ws');
 const { decodeFuelData, hasFuelData } = require('./waterford-fuel-decoder');
 const db = require('./waterford-db');
+const { findFuelStop } = require('./waterford-geozone');
 
 const createClient = (wsUrl) => {
   let ws = null;
@@ -8,8 +9,8 @@ const createClient = (wsUrl) => {
   let reconnectTimer = null;
   let messageCount = 0;
   const theftTracking = {};
-  const fillTracking = {};
   const lastEngineStatus = {};
+  const geozoneTracking = {};
 
   const parseMessage = (raw) => {
     if (!raw || raw.length < 3) return null;
@@ -94,8 +95,6 @@ const createClient = (wsUrl) => {
       console.log(`[event] ENGINE ON: ${plate} at ${time}`);
     } else if (status.includes('ENGINE OFF') || status.includes('IGNITION OFF') || status.includes('PTO OFF')) {
       console.log(`[event] ENGINE OFF: ${plate} at ${time}`);
-    } else if (status.includes('POSSIBLE FUEL FILL')) {
-      console.log(`[event] FUEL FILL: ${plate} at ${time}`);
     } else if (status.includes('POSSIBLE FUEL THEFT')) {
       console.log(`[event] FUEL THEFT: ${plate} at ${time}`);
     }
@@ -125,8 +124,7 @@ const createClient = (wsUrl) => {
 
     await processTheftStatus(msg, decoded);
     await processTheftFuelReading(msg, decoded);
-    await processFillStatus(msg, decoded);
-    await processFillFuelReading(msg, decoded);
+    await processGeozone(msg, decoded);
   };
 
   const trackEngineStatus = (msg) => {
@@ -137,13 +135,224 @@ const createClient = (wsUrl) => {
     } else if (status.includes('ENGINE ON') || status.includes('IGNITION ON') || status.includes('PTO ON')) {
       lastEngineStatus[plate] = { off: false, time: msg.loc_time };
       delete theftTracking[plate];
-      delete fillTracking[plate];
     }
   };
 
   const isVehicleEngineOff = (plate) => {
     const state = lastEngineStatus[plate];
     return state && state.off;
+  };
+
+  const isEngineOn = (msg) => {
+    const status = (msg.status || '').toUpperCase();
+    return status.includes('ENGINE ON') || status.includes('IGNITION ON') || status.includes('PTO ON');
+  };
+
+  const isEngineOff = (msg) => {
+    const status = (msg.status || '').toUpperCase();
+    return status.includes('ENGINE OFF') || status.includes('IGNITION OFF') || status.includes('PTO OFF');
+  };
+
+  const getCombinedFuel = (decoded) => {
+    if (!decoded || !hasFuelData(decoded)) return 0;
+    const p1 = parseFloat(decoded?.tank1?.volume) || 0;
+    const p2 = parseFloat(decoded?.tank2?.volume) || 0;
+    return p1 + p2;
+  };
+
+  const processGeozone = async (msg, decoded) => {
+    const plate = msg.plate;
+
+    if (!msg.latitude || !msg.longitude) return;
+
+    const fuelStop = await findFuelStop(msg.latitude, msg.longitude);
+    const tracking = geozoneTracking[plate];
+    const wasInZone = tracking && tracking.inZone;
+    const isInZone = fuelStop !== null;
+
+    if (!wasInZone && isInZone) {
+      geozoneTracking[plate] = {
+        inZone: true,
+        fuelStopId: fuelStop.id,
+        zoneName: fuelStop.name || fuelStop.geozone_name || 'Unknown',
+        engineOffInZone: false,
+        baselineFuel: 0,
+        baselineProbe1: 0,
+        baselineProbe2: 0,
+        baselineLocTime: null,
+        engineOnReceived: false,
+        fuelReadingsCount: 0,
+        fillCompleted: false,
+      };
+
+      console.log(`[geozone] ZONE ENTER: ${plate} entered "${fuelStop.name}" (id:${fuelStop.id}) at ${msg.loc_time}`);
+
+      await db.insertGeozoneEvent({
+        plate,
+        fuel_stop_id: fuelStop.id,
+        geozone_name: fuelStop.name || fuelStop.geozone_name,
+        event_type: 'ZONE_ENTER',
+        loc_time: msg.loc_time,
+        latitude: msg.latitude,
+        longitude: msg.longitude,
+      });
+
+      if (isEngineOff(msg)) {
+        geozoneTracking[plate].engineOffInZone = true;
+
+        const currentFuel = getCombinedFuel(decoded);
+        let baselineFuel = currentFuel;
+
+        if (currentFuel <= 0) {
+          const latestFuel = await db.getLastNFuelReadings(plate, 1);
+          if (latestFuel.length > 0) {
+            baselineFuel = (latestFuel[0].fuel_probe_1_volume_in_tank || 0) +
+                          (latestFuel[0].fuel_probe_2_volume_in_tank || 0);
+            geozoneTracking[plate].baselineProbe1 = latestFuel[0].fuel_probe_1_volume_in_tank || 0;
+            geozoneTracking[plate].baselineProbe2 = latestFuel[0].fuel_probe_2_volume_in_tank || 0;
+          }
+        } else {
+          geozoneTracking[plate].baselineProbe1 = parseFloat(decoded?.tank1?.volume) || 0;
+          geozoneTracking[plate].baselineProbe2 = parseFloat(decoded?.tank2?.volume) || 0;
+        }
+
+        geozoneTracking[plate].baselineFuel = baselineFuel;
+        geozoneTracking[plate].baselineLocTime = msg.loc_time;
+
+        console.log(`[geozone] ENGINE OFF IN ZONE: ${plate} - baseline: ${baselineFuel}L at ${msg.loc_time}`);
+      }
+
+      return;
+    }
+
+    if (wasInZone && !isInZone) {
+      console.log(`[geozone] ZONE EXIT: ${plate} left "${tracking.zoneName}" at ${msg.loc_time}`);
+
+      await db.insertGeozoneEvent({
+        plate,
+        fuel_stop_id: tracking.fuelStopId,
+        geozone_name: tracking.zoneName,
+        event_type: 'ZONE_EXIT',
+        loc_time: msg.loc_time,
+        latitude: msg.latitude,
+        longitude: msg.longitude,
+      });
+
+      delete geozoneTracking[plate];
+      return;
+    }
+
+    if (!wasInZone || !isInZone) return;
+
+    if (isEngineOff(msg) && !tracking.engineOffInZone) {
+      tracking.engineOffInZone = true;
+      tracking.engineOnReceived = false;
+      tracking.fuelReadingsCount = 0;
+      tracking.fillCompleted = false;
+
+      const currentFuel = getCombinedFuel(decoded);
+      let baselineFuel = currentFuel;
+
+      if (currentFuel <= 0) {
+        const latestFuel = await db.getLastNFuelReadings(plate, 1);
+        if (latestFuel.length > 0) {
+          baselineFuel = (latestFuel[0].fuel_probe_1_volume_in_tank || 0) +
+                        (latestFuel[0].fuel_probe_2_volume_in_tank || 0);
+          tracking.baselineProbe1 = latestFuel[0].fuel_probe_1_volume_in_tank || 0;
+          tracking.baselineProbe2 = latestFuel[0].fuel_probe_2_volume_in_tank || 0;
+        }
+      } else {
+        tracking.baselineProbe1 = parseFloat(decoded?.tank1?.volume) || 0;
+        tracking.baselineProbe2 = parseFloat(decoded?.tank2?.volume) || 0;
+      }
+
+      tracking.baselineFuel = baselineFuel;
+      tracking.baselineLocTime = msg.loc_time;
+
+      console.log(`[geozone] ENGINE OFF IN ZONE: ${plate} - baseline: ${baselineFuel}L at ${msg.loc_time}`);
+      return;
+    }
+
+    if (isEngineOn(msg) && tracking.engineOffInZone && !tracking.engineOnReceived) {
+      tracking.engineOnReceived = true;
+      tracking.fuelReadingsCount = 0;
+
+      console.log(`[geozone] ENGINE ON IN ZONE: ${plate} - will read next 3 fuel messages at ${msg.loc_time}`);
+      return;
+    }
+
+    if (tracking.engineOnReceived && !tracking.fillCompleted && hasFuelData(decoded)) {
+      tracking.fuelReadingsCount++;
+      const currentFuel = getCombinedFuel(decoded);
+
+      if (currentFuel > 0 && tracking.fuelReadingsCount >= 3) {
+        const fillAmount = currentFuel - tracking.baselineFuel;
+
+        if (fillAmount > 1) {
+          const startTimeIso = tracking.baselineLocTime
+            ? new Date(tracking.baselineLocTime).toISOString()
+            : new Date().toISOString();
+          const endTimeIso = msg.loc_time ? new Date(msg.loc_time).toISOString() : new Date().toISOString();
+          const startDate = tracking.baselineLocTime
+            ? tracking.baselineLocTime.split('T')[0]
+            : new Date().toISOString().split('T')[0];
+
+          try {
+            await db.insertFillSession({
+              branch: plate,
+              company: 'WATERFORD',
+              cost_code: db.getCostCode(plate),
+              session_date: startDate,
+              session_start_time: startTimeIso,
+              session_end_time: endTimeIso,
+              operating_hours: 0,
+              opening_fuel: tracking.baselineFuel,
+              opening_fuel_probe_1: tracking.baselineProbe1,
+              opening_fuel_probe_2: tracking.baselineProbe2,
+              opening_percentage: 0,
+              opening_percentage_probe_1: 0,
+              opening_percentage_probe_2: 0,
+              closing_fuel: currentFuel,
+              closing_fuel_probe_1: parseFloat(decoded?.tank1?.volume) || 0,
+              closing_fuel_probe_2: parseFloat(decoded?.tank2?.volume) || 0,
+              closing_percentage: 0,
+              closing_percentage_probe_1: 0,
+              closing_percentage_probe_2: 0,
+              total_fill: fillAmount,
+              session_status: 'FUEL_FILL_COMPLETED',
+              notes: `Geozone fill detected at "${tracking.zoneName}". Baseline: ${tracking.baselineFuel}L, After: ${currentFuel}L, Filled: ${fillAmount.toFixed(1)}L`,
+              fill_data: {
+                engine_off_time: tracking.baselineLocTime,
+                fuel_stop_id: tracking.fuelStopId,
+                zone_name: tracking.zoneName,
+                detection_method: 'geozone'
+              }
+            });
+
+            await db.insertGeozoneEvent({
+              plate,
+              fuel_stop_id: tracking.fuelStopId,
+              geozone_name: tracking.zoneName,
+              event_type: 'FILL_DETECTED',
+              loc_time: msg.loc_time,
+              latitude: msg.latitude,
+              longitude: msg.longitude,
+              fuel_before: tracking.baselineFuel,
+              fuel_after: currentFuel,
+              fill_amount: fillAmount,
+            });
+
+            console.log(`[geozone] FILL RECORDED: ${plate} at "${tracking.zoneName}" - ${tracking.baselineFuel}L -> ${currentFuel}L = +${fillAmount.toFixed(1)}L`);
+          } catch (err) {
+            console.error(`[geozone] Failed to record fill for ${plate}: ${err.message}`);
+          }
+        } else {
+          console.log(`[geozone] FILL TOO SMALL: ${plate} at "${tracking.zoneName}" - ${tracking.baselineFuel}L -> ${currentFuel}L = ${fillAmount.toFixed(1)}L (skipped)`);
+        }
+
+        tracking.fillCompleted = true;
+      }
+    }
   };
 
   const processTheftStatus = async (msg, decoded) => {
@@ -172,9 +381,6 @@ const createClient = (wsUrl) => {
     let highestFuel = 0;
     let highestProbe1 = 0;
     let highestProbe2 = 0;
-    let highestPercentage = 0;
-    let highestPct1 = 0;
-    let highestPct2 = 0;
     let highestLocTime = null;
 
     for (const r of readings) {
@@ -289,148 +495,6 @@ const createClient = (wsUrl) => {
     }
 
     delete theftTracking[plate];
-  };
-
-  const processFillStatus = async (msg, decoded) => {
-    const status = (msg.status || '').toUpperCase();
-    const plate = msg.plate;
-    if (!status.includes('POSSIBLE FUEL FILL')) return;
-    if (fillTracking[plate]) return;
-    if (!isVehicleEngineOff(plate)) {
-      console.log(`[fill] Ignored POSSIBLE FUEL FILL for ${plate} - engine not OFF`);
-      return;
-    }
-
-    const alreadyRecorded = await db.checkFillRecorded(plate, lastEngineStatus[plate].time);
-    if (alreadyRecorded) {
-      console.log(`[fill] Ignored POSSIBLE FUEL FILL for ${plate} - already recorded`);
-      return;
-    }
-
-    const engineOffTime = lastEngineStatus[plate].time;
-    const readings = await db.getFuelReadingsBetween(plate, engineOffTime, msg.loc_time);
-    if (readings.length === 0) {
-      console.log(`[fill] No fuel readings found between engine off and fill status for ${plate}`);
-      return;
-    }
-
-    let lowestFuel = Infinity;
-    let lowestProbe1 = 0;
-    let lowestProbe2 = 0;
-    let lowestLocTime = null;
-
-    for (const r of readings) {
-      const p1 = r.fuel_probe_1_volume_in_tank || 0;
-      const p2 = r.fuel_probe_2_volume_in_tank || 0;
-      const combined = p1 + p2;
-      if (combined > 0 && combined < lowestFuel) {
-        lowestFuel = combined;
-        lowestProbe1 = p1;
-        lowestProbe2 = p2;
-        lowestLocTime = r.loc_time;
-      }
-    }
-
-    if (lowestFuel === Infinity) {
-      console.log(`[fill] No valid fuel baseline found for ${plate}`);
-      return;
-    }
-
-    const currentP1 = parseFloat(decoded?.tank1?.volume) || 0;
-    const currentP2 = parseFloat(decoded?.tank2?.volume) || 0;
-    const currentFuel = currentP1 + currentP2;
-
-    fillTracking[plate] = {
-      baselineFuel: lowestFuel,
-      baselineProbe1: lowestProbe1,
-      baselineProbe2: lowestProbe2,
-      highestFuel: currentFuel,
-      highestProbe1: currentP1,
-      highestProbe2: currentP2,
-      highestLocTime: msg.loc_time,
-      consecutiveNoIncrease: 0,
-      startTime: msg.loc_time,
-      engineOffTime: engineOffTime,
-      costCode: db.getCostCode(plate)
-    };
-
-    console.log(`[fill] FILL TRACKING STARTED: ${plate} - baseline: ${lowestFuel}L at ${lowestLocTime}`);
-  };
-
-  const processFillFuelReading = async (msg, decoded) => {
-    const plate = msg.plate;
-    const tracking = fillTracking[plate];
-    if (!tracking) return;
-    if (!decoded || !hasFuelData(decoded)) return;
-
-    const currentP1 = parseFloat(decoded?.tank1?.volume) || 0;
-    const currentP2 = parseFloat(decoded?.tank2?.volume) || 0;
-    const currentFuel = currentP1 + currentP2;
-    if (currentFuel <= 0) return;
-
-    if (currentFuel > tracking.highestFuel) {
-      tracking.highestFuel = currentFuel;
-      tracking.highestProbe1 = currentP1;
-      tracking.highestProbe2 = currentP2;
-      tracking.highestLocTime = msg.loc_time;
-      tracking.consecutiveNoIncrease = 0;
-    } else {
-      tracking.consecutiveNoIncrease++;
-    }
-
-    if (tracking.consecutiveNoIncrease >= 3) {
-      await completeFill(plate, tracking);
-    }
-  };
-
-  const completeFill = async (plate, tracking) => {
-    const fillAmount = tracking.highestFuel - tracking.baselineFuel;
-    if (fillAmount < 1) {
-      console.log(`[fill] Skipping fill for ${plate} - change too small (${fillAmount.toFixed(1)}L)`);
-      delete fillTracking[plate];
-      return;
-    }
-
-    const startDate = tracking.startTime.split('T')[0];
-    const startTimeIso = new Date(tracking.startTime).toISOString();
-    const endTimeIso = tracking.highestLocTime
-      ? new Date(tracking.highestLocTime).toISOString()
-      : new Date().toISOString();
-    const durationSeconds = (new Date(endTimeIso).getTime() - new Date(startTimeIso).getTime()) / 1000;
-
-    try {
-      await db.insertFillSession({
-        branch: plate,
-        company: 'WATERFORD',
-        cost_code: tracking.costCode,
-        session_date: startDate,
-        session_start_time: startTimeIso,
-        session_end_time: endTimeIso,
-        operating_hours: durationSeconds / 3600,
-        opening_fuel: tracking.baselineFuel,
-        opening_fuel_probe_1: tracking.baselineProbe1,
-        opening_fuel_probe_2: tracking.baselineProbe2,
-        opening_percentage: 0,
-        opening_percentage_probe_1: 0,
-        opening_percentage_probe_2: 0,
-        closing_fuel: tracking.highestFuel,
-        closing_fuel_probe_1: tracking.highestProbe1,
-        closing_fuel_probe_2: tracking.highestProbe2,
-        closing_percentage: 0,
-        closing_percentage_probe_1: 0,
-        closing_percentage_probe_2: 0,
-        total_fill: fillAmount,
-        session_status: 'FUEL_FILL_COMPLETED',
-        notes: `Fill detected. Baseline: ${tracking.baselineFuel}L, Peak: ${tracking.highestFuel}L, Filled: ${fillAmount.toFixed(1)}L`,
-        fill_data: { engine_off_time: tracking.engineOffTime }
-      });
-
-      console.log(`[fill] FILL RECORDED: ${plate} - ${tracking.baselineFuel}L -> ${tracking.highestFuel}L = +${fillAmount.toFixed(1)}L`);
-    } catch (err) {
-      console.error(`[fill] Failed to record fill for ${plate}:`, err.message);
-    }
-
-    delete fillTracking[plate];
   };
 
   const scheduleReconnect = () => {

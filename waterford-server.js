@@ -1,8 +1,10 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const cron = require('node-cron');
 const db = require('./waterford-db');
 const { createClient } = require('./waterford-ws-client');
+const { syncFuelStops } = require('./waterford-geozone');
 
 const app = express();
 app.use(express.json());
@@ -70,6 +72,13 @@ app.get('/api/vehicles/:plate', async (req, res) => {
 const start = async () => {
   try {
     await db.init();
+
+    await syncFuelStops();
+
+    cron.schedule('0 0 * * *', async () => {
+      console.log('[cron] Running midnight fuel stops sync');
+      await syncFuelStops();
+    });
 
     const wsClient = createClient(process.env.WEBSOCKET_URL || 'ws://209.38.217.58:8093');
 
