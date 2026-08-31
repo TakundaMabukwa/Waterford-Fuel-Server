@@ -6,7 +6,9 @@ const supabase = process.env.SUPABASE_URL && (process.env.SUPABASE_SERVICE_ROLE_
   : null;
 
 if (!supabase) {
-  console.warn('[db] Supabase credentials not set - fill/theft sessions will not be recorded to Supabase');
+  console.error('[db] *** CRITICAL: Supabase credentials not set - fill/theft sessions will NOT be recorded ***');
+} else {
+  console.log('[db] Supabase client ready (URL: ' + (process.env.SUPABASE_URL || 'missing') + ')');
 }
 
 let pool = null;
@@ -398,12 +400,15 @@ const checkFillRecorded = async (plate, engineOffTime) => {
 
 const insertFillSession = async (session) => {
   if (!supabase) {
-    console.error('[db] Supabase not configured - cannot insert fill session');
+    console.error('[db] *** BLOCKED: Supabase not configured - cannot insert fill session ***');
     return;
   }
-  const { error } = await supabase.from('energy_rite_operating_sessions').insert(session);
+  const { data, error } = await supabase.from('energy_rite_operating_sessions').insert(session).select();
   if (error) {
-    console.error(`[db] Supabase fill insert error: ${error.message}`);
+    console.error(`[db] Supabase fill insert FAILED: ${error.message}`);
+    console.error(`[db] Details: ${error.details || 'none'} | hint: ${error.hint || 'none'} | code: ${error.code || 'none'}`);
+  } else {
+    console.log(`[db] Fill session inserted to Supabase: ${session.branch} ${session.session_date}`);
   }
 };
 
@@ -421,12 +426,15 @@ const checkTheftRecorded = async (plate, engineOffTime) => {
 
 const insertTheftSession = async (session) => {
   if (!supabase) {
-    console.error('[db] Supabase not configured - cannot insert theft session');
+    console.error('[db] *** BLOCKED: Supabase not configured - cannot insert theft session ***');
     return;
   }
-  const { error } = await supabase.from('energy_rite_operating_sessions').insert(session);
+  const { data, error } = await supabase.from('energy_rite_operating_sessions').insert(session).select();
   if (error) {
-    console.error(`[db] Supabase theft insert error: ${error.message}`);
+    console.error(`[db] Supabase theft insert FAILED: ${error.message}`);
+    console.error(`[db] Details: ${error.details || 'none'} | hint: ${error.hint || 'none'} | code: ${error.code || 'none'}`);
+  } else {
+    console.log(`[db] Theft session inserted to Supabase: ${session.branch} ${session.session_date}`);
   }
 };
 
