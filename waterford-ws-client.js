@@ -8,10 +8,8 @@ const createClient = (wsUrl) => {
   let reconnectAttempts = 0;
   let reconnectTimer = null;
   let messageCount = 0;
-  const theftTracking = {};
-  const lastEngineStatus = {};
   const geozoneTracking = {};
-  const pendingSessionClosures = {};
+  const theftMonitoring = {};
 
   const parseMessage = (raw) => {
     if (!raw || raw.length < 3) return null;
@@ -97,61 +95,8 @@ const createClient = (wsUrl) => {
     } else if (status.includes('ENGINE OFF') || status.includes('IGNITION OFF') || status.includes('PTO OFF')) {
       console.log(`[event] ENGINE OFF: ${plate} at ${time}`);
     } else if (status.includes('POSSIBLE FUEL THEFT')) {
-      console.log(`[event] FUEL THEFT: ${plate} at ${time}`);
+      console.log(`[event] POSSIBLE FUEL THEFT STATUS: ${plate} at ${time}`);
     }
-  };
-
-  const handleMessage = async (raw) => {
-    const msg = parseMessage(raw);
-    if (!msg || !db.isKnownVehicle(msg.plate)) return;
-
-    const decoded = msg.fuelDataRaw ? decodeFuelData(msg.fuelDataRaw) : null;
-    const messageType = decoded?.messageType;
-
-    messageCount++;
-    if (messageCount % 100 === 0) {
-      console.log(`[ws] ${messageCount} messages processed (latest: ${msg.plate})`);
-    }
-
-    logStatusEvents(msg);
-    trackEngineStatus(msg);
-
-    const row = buildRow(msg, decoded);
-    await db.insertHistory(row);
-
-    if (messageType === 405 && hasFuelData(decoded)) {
-      await db.upsertLatest(row);
-    }
-
-    await processTheftStatus(msg, decoded);
-    await processTheftFuelReading(msg, decoded);
-    await processGeozone(msg, decoded);
-    await handleSessionEvents(msg, decoded);
-  };
-
-  const trackEngineStatus = (msg) => {
-    const status = (msg.status || '').toUpperCase();
-    const plate = msg.plate;
-    if (status.includes('ENGINE OFF') || status.includes('IGNITION OFF') || status.includes('PTO OFF')) {
-      lastEngineStatus[plate] = { off: true, time: msg.loc_time };
-    } else if (status.includes('ENGINE ON') || status.includes('IGNITION ON') || status.includes('PTO ON')) {
-      lastEngineStatus[plate] = { off: false, time: msg.loc_time };
-      delete theftTracking[plate];
-    }
-  };
-
-  const handleSessionEvents = async (msg, decoded) => {
-    if (isEngineOn(msg)) {
-      await openSession(msg);
-    } else if (isEngineOff(msg)) {
-      await closeSession(msg);
-    }
-    await tryClosePendingSession(msg, decoded);
-  };
-
-  const isVehicleEngineOff = (plate) => {
-    const state = lastEngineStatus[plate];
-    return state && state.off;
   };
 
   const isEngineOn = (msg) => {
@@ -164,119 +109,45 @@ const createClient = (wsUrl) => {
     return status.includes('ENGINE OFF') || status.includes('IGNITION OFF') || status.includes('PTO OFF');
   };
 
-  const openSession = async (msg) => {
-    const plate = msg.plate;
-
-    const existing = await db.getOngoingSession(plate);
-    if (existing) return;
-
-    const lastFuel = await db.getLatestFuelBefore(plate, msg.loc_time);
-
-    const p1 = lastFuel ? (lastFuel.fuel_probe_1_volume_in_tank || 0) : 0;
-    const p2 = lastFuel ? (lastFuel.fuel_probe_2_volume_in_tank || 0) : 0;
-    const combined = p1 + p2;
-    const pct1 = lastFuel && lastFuel.fuel_probe_1_level_percentage != null ? lastFuel.fuel_probe_1_level_percentage : 0;
-    const pct2 = lastFuel && lastFuel.fuel_probe_2_level_percentage != null ? lastFuel.fuel_probe_2_level_percentage : 0;
-
-    const sessionDate = msg.loc_time ? msg.loc_time.split('T')[0] : new Date().toISOString().split('T')[0];
-    const startTime = msg.loc_time ? new Date(msg.loc_time).toISOString() : new Date().toISOString();
-
-    const sessionId = await db.insertOperatingSession({
-      branch: plate,
-      company: 'WATERFORD',
-      cost_code: db.getCostCode(plate),
-      session_date: sessionDate,
-      session_start_time: startTime,
-      opening_fuel: combined,
-      opening_fuel_probe_1: p1,
-      opening_fuel_probe_2: p2,
-      opening_percentage: 0,
-      opening_percentage_probe_1: pct1,
-      opening_percentage_probe_2: pct2,
-      session_status: 'ONGOING',
-      notes: `Engine started. Opening: ${combined}L (p1:${p1}L p2:${p2}L)`
-    });
-
-    if (sessionId) {
-      console.log(`[session] ENGINE ON: ${plate} - Opening: ${combined}L (id:${sessionId})`);
-    }
-  };
-
-  const closeSession = async (msg) => {
-    const plate = msg.plate;
-
-    const ongoing = await db.getOngoingSession(plate);
-    if (!ongoing) return;
-
-    const firstFuel = await db.getLatestFuelAfter(plate, msg.loc_time);
-
-    if (firstFuel) {
-      await completeSessionClose(ongoing.id, plate, firstFuel, msg.loc_time);
-    } else {
-      pendingSessionClosures[plate] = {
-        sessionId: ongoing.id,
-        locTime: msg.loc_time,
-        timestamp: Date.now()
-      };
-      console.log(`[session] ENGINE OFF: ${plate} - waiting for fuel reading to close`);
-    }
-  };
-
-  const completeSessionClose = async (sessionId, plate, fuelRow, engineOffLocTime) => {
-    const p1 = fuelRow.fuel_probe_1_volume_in_tank || 0;
-    const p2 = fuelRow.fuel_probe_2_volume_in_tank || 0;
-    const closingFuel = p1 + p2;
-
-    const ongoing = await db.getOngoingSession(plate);
-    const openingFuel = ongoing && ongoing.opening_fuel ? ongoing.opening_fuel : 0;
-    const startTime = ongoing && ongoing.session_start_time ? new Date(ongoing.session_start_time) : null;
-    const endTime = engineOffLocTime ? new Date(engineOffLocTime) : new Date();
-    const durationMs = startTime ? (endTime.getTime() - startTime.getTime()) : 0;
-    const operatingHours = durationMs / (1000 * 60 * 60);
-    const totalUsage = openingFuel - closingFuel;
-
-    await db.closeOperatingSession(sessionId, {
-      session_end_time: endTime.toISOString(),
-      operating_hours: operatingHours,
-      closing_fuel: closingFuel,
-      closing_fuel_probe_1: p1,
-      closing_fuel_probe_2: p2,
-      closing_percentage: 0,
-      closing_percentage_probe_1: 0,
-      closing_percentage_probe_2: 0,
-      total_usage: totalUsage,
-      session_status: 'COMPLETED',
-      notes: `Engine off. Closing: ${closingFuel}L (p1:${p1}L p2:${p2}L). Usage: ${totalUsage.toFixed(1)}L`
-    });
-
-    console.log(`[session] SESSION CLOSED: ${plate} - Closing: ${closingFuel}L, Hours: ${operatingHours.toFixed(2)}, Usage: ${totalUsage.toFixed(1)}L (id:${sessionId})`);
-    delete pendingSessionClosures[plate];
-  };
-
-  const tryClosePendingSession = async (msg, decoded) => {
-    const plate = msg.plate;
-    const pending = pendingSessionClosures[plate];
-    if (!pending) return;
-    if (!decoded || !hasFuelData(decoded)) return;
-
-    const p1 = parseFloat(decoded?.tank1?.volume) || 0;
-    const p2 = parseFloat(decoded?.tank2?.volume) || 0;
-    const closingFuel = p1 + p2;
-    if (closingFuel <= 0) return;
-
-    await completeSessionClose(pending.sessionId, plate, {
-      fuel_probe_1_volume_in_tank: p1,
-      fuel_probe_2_volume_in_tank: p2,
-      fuel_probe_1_level_percentage: parseFloat(decoded?.tank1?.percentage) || 0,
-      fuel_probe_2_level_percentage: parseFloat(decoded?.tank2?.percentage) || 0,
-    }, pending.locTime);
-  };
-
   const getCombinedFuel = (decoded) => {
     if (!decoded || !hasFuelData(decoded)) return 0;
     const p1 = parseFloat(decoded?.tank1?.volume) || 0;
     const p2 = parseFloat(decoded?.tank2?.volume) || 0;
     return p1 + p2;
+  };
+
+  const combinedFuelFromRow = (row) => (row.fuel_probe_1_volume_in_tank || 0) + (row.fuel_probe_2_volume_in_tank || 0);
+
+  const locTimeDiffMinutes = (time1, time2) => {
+    if (!time1 || !time2) return 0;
+    const d1 = new Date(time1);
+    const d2 = new Date(time2);
+    if (isNaN(d1.getTime()) || isNaN(d2.getTime())) return 0;
+    return Math.abs(d2.getTime() - d1.getTime()) / (1000 * 60);
+  };
+
+  const handleMessage = async (raw) => {
+    const msg = parseMessage(raw);
+    if (!msg || !db.isKnownVehicle(msg.plate)) return;
+
+    const decoded = msg.fuelDataRaw ? decodeFuelData(msg.fuelDataRaw) : null;
+
+    messageCount++;
+    if (messageCount % 100 === 0) {
+      console.log(`[ws] ${messageCount} messages processed (latest: ${msg.plate})`);
+    }
+
+    logStatusEvents(msg);
+
+    const row = buildRow(msg, decoded);
+    await db.insertHistory(row);
+
+    if (hasFuelData(decoded)) {
+      await db.upsertLatest(row);
+    }
+
+    await processGeozone(msg, decoded);
+    await processTheftDetection(msg, decoded);
   };
 
   const processGeozone = async (msg, decoded) => {
@@ -294,17 +165,15 @@ const createClient = (wsUrl) => {
         inZone: true,
         fuelStopId: fuelStop.id,
         zoneName: fuelStop.name || fuelStop.geozone_name || 'Unknown',
-        engineOffInZone: false,
-        baselineFuel: 0,
-        baselineProbe1: 0,
-        baselineProbe2: 0,
-        baselineLocTime: null,
-        engineOnReceived: false,
-        fuelReadingsCount: 0,
-        fillCompleted: false,
+        zoneEnterTime: msg.loc_time,
+        minFuel: null,
+        minTime: null,
+        maxFuel: null,
+        maxTime: null,
+        fuelFound: false,
       };
 
-      console.log(`[geozone] ZONE ENTER: ${plate} entered "${fuelStop.name}" (id:${fuelStop.id}) at ${msg.loc_time}`);
+      console.log(`[geozone] ZONE ENTER: ${plate} entered "${fuelStop.name}" at ${msg.loc_time}`);
 
       await db.insertGeozoneEvent({
         plate,
@@ -316,31 +185,7 @@ const createClient = (wsUrl) => {
         longitude: msg.longitude,
       });
 
-      if (isEngineOff(msg)) {
-        geozoneTracking[plate].engineOffInZone = true;
-
-        const currentFuel = getCombinedFuel(decoded);
-        let baselineFuel = currentFuel;
-
-        if (currentFuel <= 0) {
-          const latestFuel = await db.getLastNFuelReadings(plate, 1);
-          if (latestFuel.length > 0) {
-            baselineFuel = (latestFuel[0].fuel_probe_1_volume_in_tank || 0) +
-                          (latestFuel[0].fuel_probe_2_volume_in_tank || 0);
-            geozoneTracking[plate].baselineProbe1 = latestFuel[0].fuel_probe_1_volume_in_tank || 0;
-            geozoneTracking[plate].baselineProbe2 = latestFuel[0].fuel_probe_2_volume_in_tank || 0;
-          }
-        } else {
-          geozoneTracking[plate].baselineProbe1 = parseFloat(decoded?.tank1?.volume) || 0;
-          geozoneTracking[plate].baselineProbe2 = parseFloat(decoded?.tank2?.volume) || 0;
-        }
-
-        geozoneTracking[plate].baselineFuel = baselineFuel;
-        geozoneTracking[plate].baselineLocTime = msg.loc_time;
-
-        console.log(`[geozone] ENGINE OFF IN ZONE: ${plate} - baseline: ${baselineFuel}L at ${msg.loc_time}`);
-      }
-
+      await initFuelBaseline(plate, msg.loc_time);
       return;
     }
 
@@ -357,264 +202,264 @@ const createClient = (wsUrl) => {
         longitude: msg.longitude,
       });
 
+      if (tracking.fuelFound && tracking.minFuel !== null && tracking.maxFuel !== null) {
+        const diff = tracking.maxFuel - tracking.minFuel;
+
+        if (diff > 0) {
+          await recordGeozoneFill(plate, tracking, diff);
+        } else {
+          console.log(`[geozone] NO FILL: ${plate} - min: ${tracking.minFuel}L, max: ${tracking.maxFuel}L, diff: ${diff.toFixed(1)}L (skipped)`);
+        }
+      } else {
+        console.log(`[geozone] NO FUEL DATA: ${plate} - no fuel readings during zone visit (skipped)`);
+      }
+
       delete geozoneTracking[plate];
       return;
     }
 
     if (!wasInZone || !isInZone) return;
 
-    if (isEngineOff(msg) && !tracking.engineOffInZone) {
-      tracking.engineOffInZone = true;
-      tracking.engineOnReceived = false;
-      tracking.fuelReadingsCount = 0;
-      tracking.fillCompleted = false;
-
-      const currentFuel = getCombinedFuel(decoded);
-      let baselineFuel = currentFuel;
-
-      if (currentFuel <= 0) {
-        const latestFuel = await db.getLastNFuelReadings(plate, 1);
-        if (latestFuel.length > 0) {
-          baselineFuel = (latestFuel[0].fuel_probe_1_volume_in_tank || 0) +
-                        (latestFuel[0].fuel_probe_2_volume_in_tank || 0);
-          tracking.baselineProbe1 = latestFuel[0].fuel_probe_1_volume_in_tank || 0;
-          tracking.baselineProbe2 = latestFuel[0].fuel_probe_2_volume_in_tank || 0;
-        }
-      } else {
-        tracking.baselineProbe1 = parseFloat(decoded?.tank1?.volume) || 0;
-        tracking.baselineProbe2 = parseFloat(decoded?.tank2?.volume) || 0;
-      }
-
-      tracking.baselineFuel = baselineFuel;
-      tracking.baselineLocTime = msg.loc_time;
-
-      console.log(`[geozone] ENGINE OFF IN ZONE: ${plate} - baseline: ${baselineFuel}L at ${msg.loc_time}`);
-      return;
-    }
-
-    if (isEngineOn(msg) && tracking.engineOffInZone && !tracking.engineOnReceived) {
-      tracking.engineOnReceived = true;
-      tracking.fuelReadingsCount = 0;
-
-      console.log(`[geozone] ENGINE ON IN ZONE: ${plate} - will read next 3 fuel messages at ${msg.loc_time}`);
-      return;
-    }
-
-    if (tracking.engineOnReceived && !tracking.fillCompleted && hasFuelData(decoded)) {
-      tracking.fuelReadingsCount++;
-      const currentFuel = getCombinedFuel(decoded);
-
-      if (currentFuel > 0 && tracking.fuelReadingsCount >= 3) {
-        const fillAmount = currentFuel - tracking.baselineFuel;
-
-        if (fillAmount > 1) {
-          const startTimeIso = tracking.baselineLocTime
-            ? new Date(tracking.baselineLocTime).toISOString()
-            : new Date().toISOString();
-          const endTimeIso = msg.loc_time ? new Date(msg.loc_time).toISOString() : new Date().toISOString();
-          const startDate = tracking.baselineLocTime
-            ? tracking.baselineLocTime.split('T')[0]
-            : new Date().toISOString().split('T')[0];
-
-          try {
-            await db.insertFillSession({
-              branch: plate,
-              company: 'WATERFORD',
-              cost_code: db.getCostCode(plate),
-              session_date: startDate,
-              session_start_time: startTimeIso,
-              session_end_time: endTimeIso,
-              operating_hours: 0,
-              opening_fuel: tracking.baselineFuel,
-              opening_fuel_probe_1: tracking.baselineProbe1,
-              opening_fuel_probe_2: tracking.baselineProbe2,
-              opening_percentage: 0,
-              opening_percentage_probe_1: 0,
-              opening_percentage_probe_2: 0,
-              closing_fuel: currentFuel,
-              closing_fuel_probe_1: parseFloat(decoded?.tank1?.volume) || 0,
-              closing_fuel_probe_2: parseFloat(decoded?.tank2?.volume) || 0,
-              closing_percentage: 0,
-              closing_percentage_probe_1: 0,
-              closing_percentage_probe_2: 0,
-              total_fill: fillAmount,
-              total_usage: 0,
-              fill_events: 1,
-              fill_amount_during_session: fillAmount,
-              session_status: 'FUEL_FILL_COMPLETED',
-              notes: `Geozone fill at "${tracking.zoneName}". Baseline: ${tracking.baselineFuel}L, After: ${currentFuel}L, Filled: ${fillAmount.toFixed(1)}L | engine_off: ${tracking.baselineLocTime} | zone_id: ${tracking.fuelStopId} | detection: geozone`,
-            });
-
-            await db.insertGeozoneEvent({
-              plate,
-              fuel_stop_id: tracking.fuelStopId,
-              geozone_name: tracking.zoneName,
-              event_type: 'FILL_DETECTED',
-              loc_time: msg.loc_time,
-              latitude: msg.latitude,
-              longitude: msg.longitude,
-              fuel_before: tracking.baselineFuel,
-              fuel_after: currentFuel,
-              fill_amount: fillAmount,
-            });
-
-            console.log(`[geozone] FILL RECORDED: ${plate} at "${tracking.zoneName}" - ${tracking.baselineFuel}L -> ${currentFuel}L = +${fillAmount.toFixed(1)}L`);
-
-            await insertFuelReviewAction(plate, 'fill', fillAmount, tracking.baselineFuel, currentFuel, msg.loc_time, `zone: ${tracking.zoneName} | detection: geozone`);
-          } catch (err) {
-            console.error(`[geozone] Failed to record fill for ${plate}: ${err.message}`);
-          }
-        } else {
-          console.log(`[geozone] FILL TOO SMALL: ${plate} at "${tracking.zoneName}" - ${tracking.baselineFuel}L -> ${currentFuel}L = ${fillAmount.toFixed(1)}L (skipped)`);
-        }
-
-        tracking.fillCompleted = true;
-      }
-    }
+    await updateFuelTracking(plate, msg.loc_time);
   };
 
-  const processTheftStatus = async (msg, decoded) => {
-    const status = (msg.status || '').toUpperCase();
-    const plate = msg.plate;
-    if (!status.includes('POSSIBLE FUEL THEFT')) return;
-    if (theftTracking[plate]) return;
-    if (!isVehicleEngineOff(plate)) {
-      console.log(`[theft] Ignored POSSIBLE FUEL THEFT for ${plate} - engine not OFF`);
-      return;
-    }
-
-    const alreadyRecorded = await db.checkTheftRecorded(plate, lastEngineStatus[plate].time);
-    if (alreadyRecorded) {
-      console.log(`[theft] Ignored POSSIBLE FUEL THEFT for ${plate} - already recorded`);
-      return;
-    }
-
-    const engineOffTime = lastEngineStatus[plate].time;
-    const readings = await db.getFuelReadingsBetween(plate, engineOffTime, msg.loc_time);
-    if (readings.length === 0) {
-      console.log(`[theft] No fuel readings found between engine off and theft status for ${plate}`);
-      return;
-    }
-
-    let highestFuel = 0;
-    let highestProbe1 = 0;
-    let highestProbe2 = 0;
-    let highestLocTime = null;
-
-    for (const r of readings) {
-      const p1 = r.fuel_probe_1_volume_in_tank || 0;
-      const p2 = r.fuel_probe_2_volume_in_tank || 0;
-      const combined = p1 + p2;
-      if (combined > highestFuel) {
-        highestFuel = combined;
-        highestProbe1 = p1;
-        highestProbe2 = p2;
-        highestLocTime = r.loc_time;
-      }
-    }
-
-    if (highestFuel <= 0) {
-      console.log(`[theft] No valid fuel baseline found for ${plate}`);
-      return;
-    }
-
-    const currentP1 = parseFloat(decoded?.tank1?.volume) || 0;
-    const currentP2 = parseFloat(decoded?.tank2?.volume) || 0;
-    const currentFuel = currentP1 + currentP2;
-
-    theftTracking[plate] = {
-      baselineFuel: highestFuel,
-      baselineProbe1: highestProbe1,
-      baselineProbe2: highestProbe2,
-      lowestFuel: currentFuel,
-      lowestProbe1: currentP1,
-      lowestProbe2: currentP2,
-      lowestLocTime: msg.loc_time,
-      consecutiveNoDecrease: 0,
-      startTime: msg.loc_time,
-      engineOffTime: engineOffTime,
-      costCode: db.getCostCode(plate)
-    };
-
-    console.log(`[theft] THEFT TRACKING STARTED: ${plate} - baseline: ${highestFuel}L at ${highestLocTime}`);
-  };
-
-  const processTheftFuelReading = async (msg, decoded) => {
-    const plate = msg.plate;
-    const tracking = theftTracking[plate];
+  const initFuelBaseline = async (plate, locTime) => {
+    const tracking = geozoneTracking[plate];
     if (!tracking) return;
-    if (!decoded || !hasFuelData(decoded)) return;
 
-    const currentP1 = parseFloat(decoded?.tank1?.volume) || 0;
-    const currentP2 = parseFloat(decoded?.tank2?.volume) || 0;
-    const currentFuel = currentP1 + currentP2;
+    const lowest = await db.getLowestFuelBetween(plate, locTime, locTime);
+    const highest = await db.getHighestFuelBetween(plate, locTime, locTime);
+
+    if (lowest) {
+      const low = combinedFuelFromRow(lowest);
+      tracking.minFuel = low;
+      tracking.minTime = lowest.loc_time;
+      tracking.maxFuel = low;
+      tracking.maxTime = lowest.loc_time;
+      tracking.fuelFound = true;
+      console.log(`[geozone] BASELINE SET: ${plate} - fuel: ${low}L at ${lowest.loc_time}`);
+    } else {
+      console.log(`[geozone] WAITING FOR FUEL: ${plate} - no fuel data yet after ${locTime}`);
+      startFuelRetry(plate, locTime);
+    }
+  };
+
+  const startFuelRetry = async (plate, locTime) => {
+    const tracking = geozoneTracking[plate];
+    if (!tracking || !tracking.inZone) return;
+
+    tracking.retryTimer = setTimeout(async () => {
+      if (!geozoneTracking[plate] || !geozoneTracking[plate].inZone) return;
+
+      const lowest = await db.getLowestFuelBetween(plate, locTime, locTime);
+      if (lowest) {
+        const low = combinedFuelFromRow(lowest);
+        tracking.minFuel = low;
+        tracking.minTime = lowest.loc_time;
+        tracking.maxFuel = low;
+        tracking.maxTime = lowest.loc_time;
+        tracking.fuelFound = true;
+        console.log(`[geozone] BASELINE SET (retry): ${plate} - fuel: ${low}L at ${lowest.loc_time}`);
+      } else {
+        console.log(`[geozone] STILL WAITING: ${plate} - retrying in 10 min`);
+        startFuelRetry(plate, locTime);
+      }
+    }, 10 * 60 * 1000);
+  };
+
+  const updateFuelTracking = async (plate, locTime) => {
+    const tracking = geozoneTracking[plate];
+    if (!tracking || !tracking.inZone || !tracking.fuelFound) return;
+
+    const lowest = await db.getLowestFuelBetween(plate, tracking.zoneEnterTime, locTime);
+    const highest = await db.getHighestFuelBetween(plate, tracking.zoneEnterTime, locTime);
+
+    if (lowest) {
+      const low = combinedFuelFromRow(lowest);
+      if (tracking.minFuel === null || low < tracking.minFuel) {
+        tracking.minFuel = low;
+        tracking.minTime = lowest.loc_time;
+      }
+    }
+
+    if (highest) {
+      const high = combinedFuelFromRow(highest);
+      if (tracking.maxFuel === null || high > tracking.maxFuel) {
+        tracking.maxFuel = high;
+        tracking.maxTime = highest.loc_time;
+      }
+    }
+  };
+
+  const recordGeozoneFill = async (plate, tracking, diff) => {
+    const sessionDate = tracking.zoneEnterTime ? tracking.zoneEnterTime.split('T')[0] : new Date().toISOString().split('T')[0];
+    const startTime = tracking.minTime ? new Date(tracking.minTime).toISOString() : new Date().toISOString();
+    const endTime = tracking.maxTime ? new Date(tracking.maxTime).toISOString() : new Date().toISOString();
+
+    console.log(`[geozone] FILL RECORDED: ${plate} at "${tracking.zoneName}" - ${tracking.minFuel}L -> ${tracking.maxFuel}L = +${diff.toFixed(1)}L`);
+
+    try {
+      await db.insertFillSession({
+        branch: plate,
+        company: 'WATERFORD',
+        cost_code: db.getCostCode(plate),
+        session_date: sessionDate,
+        session_start_time: startTime,
+        session_end_time: endTime,
+        operating_hours: 0,
+        opening_fuel: tracking.minFuel,
+        opening_fuel_probe_1: 0,
+        opening_fuel_probe_2: 0,
+        opening_percentage: 0,
+        opening_percentage_probe_1: 0,
+        opening_percentage_probe_2: 0,
+        closing_fuel: tracking.maxFuel,
+        closing_fuel_probe_1: 0,
+        closing_fuel_probe_2: 0,
+        closing_percentage: 0,
+        closing_percentage_probe_1: 0,
+        closing_percentage_probe_2: 0,
+        total_fill: diff,
+        total_usage: 0,
+        fill_events: 1,
+        fill_amount_during_session: diff,
+        session_status: 'FUEL_FILL_COMPLETED',
+        notes: `Geozone fill at "${tracking.zoneName}". Min: ${tracking.minFuel}L (${tracking.minTime}), Max: ${tracking.maxFuel}L (${tracking.maxTime}), Filled: ${diff.toFixed(1)}L | zone_id: ${tracking.fuelStopId} | detection: geozone`,
+      });
+
+      await db.insertGeozoneEvent({
+        plate,
+        fuel_stop_id: tracking.fuelStopId,
+        geozone_name: tracking.zoneName,
+        event_type: 'FILL_DETECTED',
+        loc_time: tracking.maxTime,
+        latitude: 0,
+        longitude: 0,
+        fuel_before: tracking.minFuel,
+        fuel_after: tracking.maxFuel,
+        fill_amount: diff,
+      });
+
+      await insertFuelReviewAction(plate, 'fill', diff, tracking.minFuel, tracking.maxFuel, tracking.maxTime, `zone: ${tracking.zoneName} | min: ${tracking.minFuel}L | max: ${tracking.maxFuel}L | detection: geozone`);
+    } catch (err) {
+      console.error(`[geozone] Failed to record fill for ${plate}: ${err.message}`);
+    }
+  };
+
+  const processTheftDetection = async (msg, decoded) => {
+    const plate = msg.plate;
+    const monitoring = theftMonitoring[plate];
+
+    if (!isEngineOff(msg)) {
+      if (monitoring) {
+        delete theftMonitoring[plate];
+        console.log(`[theft] CLEARED: ${plate} - engine turned on`);
+      }
+      return;
+    }
+
+    const latestReading = await db.getLatestFuelReading(plate);
+    if (!latestReading) return;
+
+    const currentFuel = combinedFuelFromRow(latestReading);
+    const currentTime = latestReading.loc_time;
+
     if (currentFuel <= 0) return;
 
-    if (currentFuel < tracking.lowestFuel) {
-      tracking.lowestFuel = currentFuel;
-      tracking.lowestProbe1 = currentP1;
-      tracking.lowestProbe2 = currentP2;
-      tracking.lowestLocTime = msg.loc_time;
-      tracking.consecutiveNoDecrease = 0;
-    } else {
-      tracking.consecutiveNoDecrease++;
-    }
-
-    if (tracking.consecutiveNoDecrease >= 3) {
-      await completeTheft(plate, tracking);
-    }
-  };
-
-  const completeTheft = async (plate, tracking) => {
-    const theftAmount = tracking.baselineFuel - tracking.lowestFuel;
-    if (theftAmount < 1) {
-      console.log(`[theft] Skipping theft for ${plate} - change too small (${theftAmount.toFixed(1)}L)`);
-      delete theftTracking[plate];
+    if (!monitoring) {
+      theftMonitoring[plate] = {
+        lastFuel: currentFuel,
+        lastTime: currentTime,
+        baselineFuel: currentFuel,
+        baselineTime: currentTime,
+        lowestFuel: currentFuel,
+        lowestTime: currentTime,
+        consecutiveNoDecrease: 0,
+        trackingActive: false,
+      };
       return;
     }
 
-    const startDate = tracking.startTime.split('T')[0];
-    const startTimeIso = new Date(tracking.startTime).toISOString();
-    const endTimeIso = tracking.lowestLocTime
-      ? new Date(tracking.lowestLocTime).toISOString()
-      : new Date().toISOString();
-    const durationSeconds = (new Date(endTimeIso).getTime() - new Date(startTimeIso).getTime()) / 1000;
+    const timeDiff = locTimeDiffMinutes(monitoring.lastTime, currentTime);
+    const fuelDiff = monitoring.lastFuel - currentFuel;
+
+    if (!monitoring.trackingActive) {
+      if (timeDiff > 2 && fuelDiff >= 10) {
+        monitoring.trackingActive = true;
+        monitoring.baselineFuel = monitoring.lastFuel;
+        monitoring.baselineTime = monitoring.lastTime;
+        monitoring.lowestFuel = currentFuel;
+        monitoring.lowestTime = currentTime;
+        monitoring.consecutiveNoDecrease = 0;
+        console.log(`[theft] THEFT DETECTED: ${plate} - ${monitoring.baselineFuel}L -> ${currentFuel}L = -${fuelDiff.toFixed(1)}L in ${timeDiff.toFixed(1)} min`);
+      } else {
+        monitoring.lastFuel = currentFuel;
+        monitoring.lastTime = currentTime;
+      }
+      return;
+    }
+
+    if (currentFuel < monitoring.lowestFuel) {
+      monitoring.lowestFuel = currentFuel;
+      monitoring.lowestTime = currentTime;
+      monitoring.consecutiveNoDecrease = 0;
+    } else {
+      monitoring.consecutiveNoDecrease++;
+    }
+
+    if (monitoring.consecutiveNoDecrease >= 3) {
+      await completeTheft(plate, monitoring);
+    }
+  };
+
+  const completeTheft = async (plate, monitoring) => {
+    const theftAmount = monitoring.baselineFuel - monitoring.lowestFuel;
+
+    if (theftAmount < 1) {
+      console.log(`[theft] SKIP: ${plate} - change too small (${theftAmount.toFixed(1)}L)`);
+      delete theftMonitoring[plate];
+      return;
+    }
+
+    const sessionDate = monitoring.baselineTime ? monitoring.baselineTime.split('T')[0] : new Date().toISOString().split('T')[0];
+    const startTime = monitoring.baselineTime ? new Date(monitoring.baselineTime).toISOString() : new Date().toISOString();
+    const endTime = monitoring.lowestTime ? new Date(monitoring.lowestTime).toISOString() : new Date().toISOString();
+
+    console.log(`[theft] THEFT RECORDED: ${plate} - ${monitoring.baselineFuel}L -> ${monitoring.lowestFuel}L = -${theftAmount.toFixed(1)}L`);
 
     try {
       await db.insertTheftSession({
         branch: plate,
         company: 'WATERFORD',
-        cost_code: tracking.costCode,
-        session_date: startDate,
-        session_start_time: startTimeIso,
-        session_end_time: endTimeIso,
-        operating_hours: durationSeconds / 3600,
-        opening_fuel: tracking.baselineFuel,
-        opening_fuel_probe_1: tracking.baselineProbe1,
-        opening_fuel_probe_2: tracking.baselineProbe2,
+        cost_code: db.getCostCode(plate),
+        session_date: sessionDate,
+        session_start_time: startTime,
+        session_end_time: endTime,
+        operating_hours: 0,
+        opening_fuel: monitoring.baselineFuel,
+        opening_fuel_probe_1: 0,
+        opening_fuel_probe_2: 0,
         opening_percentage: 0,
         opening_percentage_probe_1: 0,
         opening_percentage_probe_2: 0,
-        closing_fuel: tracking.lowestFuel,
-        closing_fuel_probe_1: tracking.lowestProbe1,
-        closing_fuel_probe_2: tracking.lowestProbe2,
+        closing_fuel: monitoring.lowestFuel,
+        closing_fuel_probe_1: 0,
+        closing_fuel_probe_2: 0,
         closing_percentage: 0,
         closing_percentage_probe_1: 0,
         closing_percentage_probe_2: 0,
         total_theft: theftAmount,
         total_usage: 0,
         session_status: 'FUEL_THEFT_COMPLETED',
-        notes: `Theft detected. Baseline: ${tracking.baselineFuel}L, Lowest: ${tracking.lowestFuel}L, Lost: ${theftAmount.toFixed(1)}L | engine_off: ${tracking.engineOffTime} | detection: status trigger`,
+        notes: `Theft detected. Baseline: ${monitoring.baselineFuel}L (${monitoring.baselineTime}), Lowest: ${monitoring.lowestFuel}L (${monitoring.lowestTime}), Lost: ${theftAmount.toFixed(1)}L | detection: engine-off monitoring`,
       });
 
-      console.log(`[theft] THEFT RECORDED: ${plate} - ${tracking.baselineFuel}L -> ${tracking.lowestFuel}L = -${theftAmount.toFixed(1)}L`);
-
-      await insertFuelReviewAction(plate, 'theft', theftAmount, tracking.baselineFuel, tracking.lowestFuel, tracking.lowestLocTime, `detection: status trigger`);
+      await insertFuelReviewAction(plate, 'theft', theftAmount, monitoring.baselineFuel, monitoring.lowestFuel, monitoring.lowestTime, `baseline: ${monitoring.baselineFuel}L | lowest: ${monitoring.lowestFuel}L | detection: engine-off monitoring`);
     } catch (err) {
-      console.error(`[theft] Failed to record theft for ${plate}:`, err.message);
+      console.error(`[theft] Failed to record theft for ${plate}: ${err.message}`);
     }
 
-    delete theftTracking[plate];
+    delete theftMonitoring[plate];
   };
 
   const scheduleReconnect = () => {
@@ -661,6 +506,11 @@ const createClient = (wsUrl) => {
     if (reconnectTimer) {
       clearTimeout(reconnectTimer);
       reconnectTimer = null;
+    }
+    for (const plate of Object.keys(geozoneTracking)) {
+      if (geozoneTracking[plate].retryTimer) {
+        clearTimeout(geozoneTracking[plate].retryTimer);
+      }
     }
     if (ws) {
       ws.close();

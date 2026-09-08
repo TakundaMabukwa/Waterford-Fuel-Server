@@ -509,6 +509,63 @@ const getLowestFuelFromTime = async (plate, locTime) => {
   return rows.length > 0 ? rows[0] : null;
 };
 
+const getHighestFuelAfter = async (plate, locTime) => {
+  const sql = `
+    SELECT fuel_probe_1_volume_in_tank, fuel_probe_2_volume_in_tank, loc_time, created_at
+    FROM vehicle_history
+    WHERE plate = $1
+      AND loc_time >= $2
+      AND (fuel_probe_1_volume_in_tank > 0 OR fuel_probe_2_volume_in_tank > 0)
+    ORDER BY (COALESCE(fuel_probe_1_volume_in_tank, 0) + COALESCE(fuel_probe_2_volume_in_tank, 0)) DESC
+    LIMIT 1
+  `;
+  const { rows } = await query(sql, [plate, locTime]);
+  return rows.length > 0 ? rows[0] : null;
+};
+
+const getHighestFuelBetween = async (plate, from, to) => {
+  const sql = `
+    SELECT fuel_probe_1_volume_in_tank, fuel_probe_2_volume_in_tank, loc_time, created_at
+    FROM vehicle_history
+    WHERE plate = $1
+      AND loc_time >= $2
+      AND loc_time <= $3
+      AND (fuel_probe_1_volume_in_tank > 0 OR fuel_probe_2_volume_in_tank > 0)
+    ORDER BY (COALESCE(fuel_probe_1_volume_in_tank, 0) + COALESCE(fuel_probe_2_volume_in_tank, 0)) DESC
+    LIMIT 1
+  `;
+  const { rows } = await query(sql, [plate, from, to]);
+  return rows.length > 0 ? rows[0] : null;
+};
+
+const getLowestFuelBetween = async (plate, from, to) => {
+  const sql = `
+    SELECT fuel_probe_1_volume_in_tank, fuel_probe_2_volume_in_tank, loc_time, created_at
+    FROM vehicle_history
+    WHERE plate = $1
+      AND loc_time >= $2
+      AND loc_time <= $3
+      AND (fuel_probe_1_volume_in_tank > 0 OR fuel_probe_2_volume_in_tank > 0)
+    ORDER BY (COALESCE(fuel_probe_1_volume_in_tank, 0) + COALESCE(fuel_probe_2_volume_in_tank, 0)) ASC
+    LIMIT 1
+  `;
+  const { rows } = await query(sql, [plate, from, to]);
+  return rows.length > 0 ? rows[0] : null;
+};
+
+const getLatestFuelReading = async (plate) => {
+  const sql = `
+    SELECT fuel_probe_1_volume_in_tank, fuel_probe_2_volume_in_tank, loc_time, created_at
+    FROM vehicle_history
+    WHERE plate = $1
+      AND (fuel_probe_1_volume_in_tank > 0 OR fuel_probe_2_volume_in_tank > 0)
+    ORDER BY created_at DESC
+    LIMIT 1
+  `;
+  const { rows } = await query(sql, [plate]);
+  return rows.length > 0 ? rows[0] : null;
+};
+
 const getLastNFuelReadings = async (plate, count) => {
   const sql = `
     SELECT fuel_probe_1_volume_in_tank, fuel_probe_2_volume_in_tank, loc_time, created_at
@@ -620,5 +677,6 @@ module.exports = {
   checkTheftRecorded, insertTheftSession,
   upsertFuelStop, insertGeozoneEvent, getLowestFuelFromTime, getLastNFuelReadings,
   getOngoingSession, insertOperatingSession, closeOperatingSession,
-  getLatestFuelBefore, getLatestFuelAfter
+  getLatestFuelBefore, getLatestFuelAfter,
+  getHighestFuelAfter, getHighestFuelBetween, getLowestFuelBetween, getLatestFuelReading
 };
