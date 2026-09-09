@@ -28,12 +28,13 @@ const syncFuelStops = async () => {
       .eq('type', 'Fuel Stop');
 
     if (error) throw error;
-    if (!stops || stops.length === 0) {
-      console.log('[geozone] No fuel stops found in WATERFORD Supabase');
+    if (!stops) {
+      console.log('[geozone] No fuel stops returned from WATERFORD Supabase');
       return 0;
     }
 
     let synced = 0;
+    const syncedIds = [];
     for (const stop of stops) {
       await db.upsertFuelStop({
         id: stop.id,
@@ -56,13 +57,15 @@ const syncFuelStops = async () => {
         prescribed_value: stop.prescribed_value,
         fuel_type: stop.fuel_type,
       });
+      syncedIds.push(stop.id);
       synced++;
     }
 
     const { rowCount: removed } = await db.query(
-      `DELETE FROM fuel_stops WHERE type IS DISTINCT FROM 'Fuel Stop'`
+      `DELETE FROM fuel_stops WHERE id <> ALL($1::bigint[])`,
+      [syncedIds]
     );
-    if (removed) console.log(`[geozone] Removed ${removed} non-Fuel-Stop rows from local cache`);
+    if (removed) console.log(`[geozone] Removed ${removed} stale rows not in Supabase`);
 
     console.log(`[geozone] Synced ${synced} fuel stops from WATERFORD Supabase`);
     cachedFuelStops = null;
