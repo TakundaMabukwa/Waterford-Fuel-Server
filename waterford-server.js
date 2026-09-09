@@ -75,8 +75,8 @@ const start = async () => {
 
     await syncFuelStops();
 
-    cron.schedule('0 0 * * *', async () => {
-      console.log('[cron] Running midnight fuel stops sync');
+    cron.schedule('0 * * * *', async () => {
+      console.log('[cron] Running hourly fuel stops sync');
       await syncFuelStops();
     });
 

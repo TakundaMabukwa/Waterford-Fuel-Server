@@ -24,7 +24,8 @@ const syncFuelStops = async () => {
   try {
     const { data: stops, error } = await waterfordSupabase
       .from('fuel_stops')
-      .select('*');
+      .select('*')
+      .eq('type', 'Fuel Stop');
 
     if (error) throw error;
     if (!stops || stops.length === 0) {
@@ -53,9 +54,15 @@ const syncFuelStops = async () => {
         capacity: stop.capacity,
         notes: stop.notes,
         prescribed_value: stop.prescribed_value,
+        fuel_type: stop.fuel_type,
       });
       synced++;
     }
+
+    const { rowCount: removed } = await db.query(
+      `DELETE FROM fuel_stops WHERE type IS DISTINCT FROM 'Fuel Stop'`
+    );
+    if (removed) console.log(`[geozone] Removed ${removed} non-Fuel-Stop rows from local cache`);
 
     console.log(`[geozone] Synced ${synced} fuel stops from WATERFORD Supabase`);
     cachedFuelStops = null;
