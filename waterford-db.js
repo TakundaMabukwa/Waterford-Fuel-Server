@@ -316,92 +316,6 @@ const upsertLatest = async (row) => {
   await query(sql, HISTORY_COLUMNS.map(c => row[c]));
 };
 
-const getLastEngineOffBefore = async (plate, time) => {
-  const sql = `
-    SELECT loc_time FROM vehicle_history
-    WHERE plate = $1
-      AND (UPPER(status) LIKE '%ENGINE OFF%' OR UPPER(status) LIKE '%IGNITION OFF%')
-      AND loc_time < $2
-    ORDER BY created_at DESC
-    LIMIT 1
-  `;
-  const { rows } = await query(sql, [plate, time]);
-  return rows.length > 0 ? rows[0].loc_time : null;
-};
-
-const getHighestFuelBetweenTimes = async (plate, from, to) => {
-  const sql = `
-    SELECT fuel_probe_1_volume_in_tank, fuel_probe_2_volume_in_tank, loc_time, created_at
-    FROM vehicle_history
-    WHERE plate = $1
-      AND loc_time >= $2
-      AND loc_time <= $3
-      AND (fuel_probe_1_volume_in_tank > 0 OR fuel_probe_2_volume_in_tank > 0)
-    ORDER BY (COALESCE(fuel_probe_1_volume_in_tank, 0) + COALESCE(fuel_probe_2_volume_in_tank, 0)) DESC
-    LIMIT 1
-  `;
-  const { rows } = await query(sql, [plate, from, to]);
-  return rows.length > 0 ? rows[0] : null;
-};
-
-const getFuelReadingsBetween = async (plate, from, to) => {
-  const sql = `
-    SELECT fuel_probe_1_volume_in_tank, fuel_probe_2_volume_in_tank, loc_time, created_at
-    FROM vehicle_history
-    WHERE plate = $1
-      AND loc_time >= $2
-      AND loc_time <= $3
-      AND (fuel_probe_1_volume_in_tank > 0 OR fuel_probe_2_volume_in_tank > 0)
-    ORDER BY created_at ASC
-  `;
-  const { rows } = await query(sql, [plate, from, to]);
-  return rows;
-};
-
-const getRecentFuelReadings = async (plate, count) => {
-  const sql = `
-    SELECT fuel_probe_1_volume_in_tank, fuel_probe_2_volume_in_tank, loc_time, created_at
-    FROM vehicle_history
-    WHERE plate = $1
-      AND (fuel_probe_1_volume_in_tank > 0 OR fuel_probe_2_volume_in_tank > 0)
-    ORDER BY created_at DESC
-    LIMIT $2
-  `;
-  const { rows } = await query(sql, [plate, count]);
-  return rows.reverse();
-};
-
-const getLowestFuelBetweenTimes = async (plate, from, to) => {
-  const sql = `
-    SELECT fuel_probe_1_volume_in_tank, fuel_probe_2_volume_in_tank, loc_time, created_at
-    FROM vehicle_history
-    WHERE plate = $1
-      AND loc_time >= $2
-      AND loc_time <= $3
-      AND (fuel_probe_1_volume_in_tank > 0 OR fuel_probe_2_volume_in_tank > 0)
-    ORDER BY (COALESCE(fuel_probe_1_volume_in_tank, 0) + COALESCE(fuel_probe_2_volume_in_tank, 0)) ASC
-    LIMIT 1
-  `;
-  const { rows } = await query(sql, [plate, from, to]);
-  return rows.length > 0 ? rows[0] : null;
-};
-
-const checkFillRecorded = async (plate, engineOffTime) => {
-  if (!supabase) return false;
-  const { data, error } = await supabase
-    .from('energy_rite_operating_sessions')
-    .select('id')
-    .eq('branch', plate)
-    .eq('session_status', 'FUEL_FILL_COMPLETED')
-    .eq('session_start_time', engineOffTime)
-    .limit(1);
-  if (error) {
-    console.error(`[db] checkFillRecorded error: ${error.message}`);
-    return false;
-  }
-  return data && data.length > 0;
-};
-
 const insertFillSession = async (session) => {
   if (!supabase) {
     console.error('[db] *** BLOCKED: Supabase not configured - cannot insert fill session ***');
@@ -414,22 +328,6 @@ const insertFillSession = async (session) => {
   } else {
     console.log(`[db] Fill session inserted to Supabase: ${session.branch} ${session.session_date}`);
   }
-};
-
-const checkTheftRecorded = async (plate, engineOffTime) => {
-  if (!supabase) return false;
-  const { data, error } = await supabase
-    .from('energy_rite_operating_sessions')
-    .select('id')
-    .eq('branch', plate)
-    .eq('session_status', 'FUEL_THEFT_COMPLETED')
-    .eq('session_start_time', engineOffTime)
-    .limit(1);
-  if (error) {
-    console.error(`[db] checkTheftRecorded error: ${error.message}`);
-    return false;
-  }
-  return data && data.length > 0;
 };
 
 const insertTheftSession = async (session) => {
@@ -493,64 +391,6 @@ const insertGeozoneEvent = async (event) => {
     event.loc_time, event.latitude, event.longitude,
     event.fuel_before, event.fuel_after, event.fill_amount
   ]);
-};
-
-const getLowestFuelFromTime = async (plate, locTime) => {
-  const sql = `
-    SELECT fuel_probe_1_volume_in_tank, fuel_probe_2_volume_in_tank, loc_time, created_at
-    FROM vehicle_history
-    WHERE plate = $1
-      AND loc_time >= $2
-      AND (fuel_probe_1_volume_in_tank > 0 OR fuel_probe_2_volume_in_tank > 0)
-    ORDER BY (COALESCE(fuel_probe_1_volume_in_tank, 0) + COALESCE(fuel_probe_2_volume_in_tank, 0)) ASC
-    LIMIT 1
-  `;
-  const { rows } = await query(sql, [plate, locTime]);
-  return rows.length > 0 ? rows[0] : null;
-};
-
-const getHighestFuelAfter = async (plate, locTime) => {
-  const sql = `
-    SELECT fuel_probe_1_volume_in_tank, fuel_probe_2_volume_in_tank, loc_time, created_at
-    FROM vehicle_history
-    WHERE plate = $1
-      AND loc_time >= $2
-      AND (fuel_probe_1_volume_in_tank > 0 OR fuel_probe_2_volume_in_tank > 0)
-    ORDER BY (COALESCE(fuel_probe_1_volume_in_tank, 0) + COALESCE(fuel_probe_2_volume_in_tank, 0)) DESC
-    LIMIT 1
-  `;
-  const { rows } = await query(sql, [plate, locTime]);
-  return rows.length > 0 ? rows[0] : null;
-};
-
-const getHighestFuelBetween = async (plate, from, to) => {
-  const sql = `
-    SELECT fuel_probe_1_volume_in_tank, fuel_probe_2_volume_in_tank, loc_time, created_at
-    FROM vehicle_history
-    WHERE plate = $1
-      AND loc_time >= $2
-      AND loc_time <= $3
-      AND (fuel_probe_1_volume_in_tank > 0 OR fuel_probe_2_volume_in_tank > 0)
-    ORDER BY (COALESCE(fuel_probe_1_volume_in_tank, 0) + COALESCE(fuel_probe_2_volume_in_tank, 0)) DESC
-    LIMIT 1
-  `;
-  const { rows } = await query(sql, [plate, from, to]);
-  return rows.length > 0 ? rows[0] : null;
-};
-
-const getLowestFuelBetween = async (plate, from, to) => {
-  const sql = `
-    SELECT fuel_probe_1_volume_in_tank, fuel_probe_2_volume_in_tank, loc_time, created_at
-    FROM vehicle_history
-    WHERE plate = $1
-      AND loc_time >= $2
-      AND loc_time <= $3
-      AND (fuel_probe_1_volume_in_tank > 0 OR fuel_probe_2_volume_in_tank > 0)
-    ORDER BY (COALESCE(fuel_probe_1_volume_in_tank, 0) + COALESCE(fuel_probe_2_volume_in_tank, 0)) ASC
-    LIMIT 1
-  `;
-  const { rows } = await query(sql, [plate, from, to]);
-  return rows.length > 0 ? rows[0] : null;
 };
 
 const getLatestFuelReading = async (plate) => {
@@ -623,35 +463,6 @@ const closeOperatingSession = async (sessionId, closingData) => {
   }
 };
 
-const getLatestFuelBefore = async (plate, locTime) => {
-  const sql = `
-    SELECT fuel_probe_1_volume_in_tank, fuel_probe_2_volume_in_tank,
-           fuel_probe_1_level_percentage, fuel_probe_2_level_percentage, loc_time
-    FROM vehicle_history
-    WHERE plate = $1
-      AND loc_time < $2
-      AND (fuel_probe_1_volume_in_tank > 0 OR fuel_probe_2_volume_in_tank > 0)
-    ORDER BY created_at DESC
-    LIMIT 1
-  `;
-  const { rows } = await query(sql, [plate, locTime]);
-  return rows.length > 0 ? rows[0] : null;
-};
-
-const getLatestFuelAfter = async (plate, locTime) => {
-  const sql = `
-    SELECT fuel_probe_1_volume_in_tank, fuel_probe_2_volume_in_tank, loc_time
-    FROM vehicle_history
-    WHERE plate = $1
-      AND loc_time >= $2
-      AND (fuel_probe_1_volume_in_tank > 0 OR fuel_probe_2_volume_in_tank > 0)
-    ORDER BY created_at ASC
-    LIMIT 1
-  `;
-  const { rows } = await query(sql, [plate, locTime]);
-  return rows.length > 0 ? rows[0] : null;
-};
-
 const init = async () => {
   if (initialized) return;
   await waitForDatabase();
@@ -671,12 +482,8 @@ const close = async () => {
 
 module.exports = {
   init, close, query, isKnownVehicle, getCostCode, insertHistory, upsertLatest,
-  getLastEngineOffBefore, getHighestFuelBetweenTimes, getLowestFuelBetweenTimes,
-  getFuelReadingsBetween, getRecentFuelReadings,
-  checkFillRecorded, insertFillSession,
-  checkTheftRecorded, insertTheftSession,
-  upsertFuelStop, insertGeozoneEvent, getLowestFuelFromTime, getLastNFuelReadings,
+  insertFillSession, insertTheftSession,
+  upsertFuelStop, insertGeozoneEvent, getLastNFuelReadings,
   getOngoingSession, insertOperatingSession, closeOperatingSession,
-  getLatestFuelBefore, getLatestFuelAfter,
-  getHighestFuelAfter, getHighestFuelBetween, getLowestFuelBetween, getLatestFuelReading
+  getLatestFuelReading
 };

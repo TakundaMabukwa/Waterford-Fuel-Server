@@ -156,9 +156,25 @@ const createClient = (wsUrl) => {
     if (!msg.latitude || !msg.longitude) return;
 
     const fuelStop = await findFuelStop(msg.latitude, msg.longitude);
-    const tracking = geozoneTracking[plate];
-    const wasInZone = tracking && tracking.inZone;
+    let tracking = geozoneTracking[plate];
     const isInZone = fuelStop !== null;
+    const msgFuel = getCombinedFuel(decoded);
+
+    if (tracking && tracking.waitingPostFill) {
+      if (msgFuel > 0) {
+        tracking.postFill = msgFuel;
+        tracking.postFillLocTime = msg.loc_time;
+        tracking.waitingPostFill = false;
+        await finalizeFill(plate, tracking);
+        tracking = geozoneTracking[plate] || null;
+      } else if (isInZone) {
+        return;
+      } else {
+        return;
+      }
+    }
+
+    const wasInZone = tracking && tracking.inZone;
 
     if (!wasInZone && isInZone) {
       geozoneTracking[plate] = {
@@ -166,11 +182,13 @@ const createClient = (wsUrl) => {
         fuelStopId: fuelStop.id,
         zoneName: fuelStop.name || fuelStop.geozone_name || 'Unknown',
         zoneEnterTime: msg.loc_time,
-        minFuel: null,
-        minTime: null,
-        maxFuel: null,
-        maxTime: null,
-        fuelFound: false,
+        preFill: null,
+        preFillLocTime: null,
+        postFill: null,
+        postFillLocTime: null,
+        exitLatitude: null,
+        exitLongitude: null,
+        waitingPostFill: false,
       };
 
       console.log(`[geozone] ZONE ENTER: ${plate} entered "${fuelStop.name}" at ${msg.loc_time}`);
@@ -185,7 +203,7 @@ const createClient = (wsUrl) => {
         longitude: msg.longitude,
       });
 
-      await initFuelBaseline(plate, msg.loc_time);
+      await initPreFill(plate);
       return;
     }
 
@@ -202,101 +220,71 @@ const createClient = (wsUrl) => {
         longitude: msg.longitude,
       });
 
-      if (tracking.fuelFound && tracking.minFuel !== null && tracking.maxFuel !== null) {
-        const diff = tracking.maxFuel - tracking.minFuel;
+      tracking.exitLatitude = msg.latitude;
+      tracking.exitLongitude = msg.longitude;
 
-        if (diff > 0) {
-          await recordGeozoneFill(plate, tracking, diff);
-        } else {
-          console.log(`[geozone] NO FILL: ${plate} - min: ${tracking.minFuel}L, max: ${tracking.maxFuel}L, diff: ${diff.toFixed(1)}L (skipped)`);
-        }
+      if (msgFuel > 0) {
+        tracking.postFill = msgFuel;
+        tracking.postFillLocTime = msg.loc_time;
+        await finalizeFill(plate, tracking);
       } else {
-        console.log(`[geozone] NO FUEL DATA: ${plate} - no fuel readings during zone visit (skipped)`);
+        tracking.inZone = false;
+        tracking.waitingPostFill = true;
       }
-
-      delete geozoneTracking[plate];
       return;
     }
 
     if (!wasInZone || !isInZone) return;
 
-    await updateFuelTracking(plate, msg.loc_time);
+    if (tracking.preFill === null) {
+      await initPreFill(plate);
+    }
   };
 
-  const initFuelBaseline = async (plate, locTime) => {
+  const initPreFill = async (plate) => {
     const tracking = geozoneTracking[plate];
     if (!tracking) return;
 
-    const lowest = await db.getLowestFuelBetween(plate, locTime, locTime);
-    const highest = await db.getHighestFuelBetween(plate, locTime, locTime);
-
-    if (lowest) {
-      const low = combinedFuelFromRow(lowest);
-      tracking.minFuel = low;
-      tracking.minTime = lowest.loc_time;
-      tracking.maxFuel = low;
-      tracking.maxTime = lowest.loc_time;
-      tracking.fuelFound = true;
-      console.log(`[geozone] BASELINE SET: ${plate} - fuel: ${low}L at ${lowest.loc_time}`);
-    } else {
-      console.log(`[geozone] WAITING FOR FUEL: ${plate} - no fuel data yet after ${locTime}`);
-      startFuelRetry(plate, locTime);
+    const rows = await db.getLastNFuelReadings(plate, 5);
+    if (!rows || rows.length === 0) {
+      console.log(`[geozone] NO PRE-FILL DATA: ${plate} - retrying on next in-zone message`);
+      return;
     }
-  };
 
-  const startFuelRetry = async (plate, locTime) => {
-    const tracking = geozoneTracking[plate];
-    if (!tracking || !tracking.inZone) return;
-
-    tracking.retryTimer = setTimeout(async () => {
-      if (!geozoneTracking[plate] || !geozoneTracking[plate].inZone) return;
-
-      const lowest = await db.getLowestFuelBetween(plate, locTime, locTime);
-      if (lowest) {
-        const low = combinedFuelFromRow(lowest);
-        tracking.minFuel = low;
-        tracking.minTime = lowest.loc_time;
-        tracking.maxFuel = low;
-        tracking.maxTime = lowest.loc_time;
-        tracking.fuelFound = true;
-        console.log(`[geozone] BASELINE SET (retry): ${plate} - fuel: ${low}L at ${lowest.loc_time}`);
-      } else {
-        console.log(`[geozone] STILL WAITING: ${plate} - retrying in 10 min`);
-        startFuelRetry(plate, locTime);
-      }
-    }, 10 * 60 * 1000);
-  };
-
-  const updateFuelTracking = async (plate, locTime) => {
-    const tracking = geozoneTracking[plate];
-    if (!tracking || !tracking.inZone || !tracking.fuelFound) return;
-
-    const lowest = await db.getLowestFuelBetween(plate, tracking.zoneEnterTime, locTime);
-    const highest = await db.getHighestFuelBetween(plate, tracking.zoneEnterTime, locTime);
-
-    if (lowest) {
-      const low = combinedFuelFromRow(lowest);
-      if (tracking.minFuel === null || low < tracking.minFuel) {
-        tracking.minFuel = low;
-        tracking.minTime = lowest.loc_time;
+    let min = null;
+    let minTime = null;
+    for (const r of rows) {
+      const f = combinedFuelFromRow(r);
+      if (min === null || f < min) {
+        min = f;
+        minTime = r.loc_time;
       }
     }
 
-    if (highest) {
-      const high = combinedFuelFromRow(highest);
-      if (tracking.maxFuel === null || high > tracking.maxFuel) {
-        tracking.maxFuel = high;
-        tracking.maxTime = highest.loc_time;
-      }
-    }
+    tracking.preFill = min;
+    tracking.preFillLocTime = minTime;
+    console.log(`[geozone] PRE-FILL SET: ${plate} - lowest of last ${rows.length}: ${min}L at ${minTime}`);
   };
 
-  const recordGeozoneFill = async (plate, tracking, diff) => {
-    const sessionDate = tracking.zoneEnterTime ? tracking.zoneEnterTime.split('T')[0] : new Date().toISOString().split('T')[0];
-    const startTime = tracking.minTime ? new Date(tracking.minTime).toISOString() : new Date().toISOString();
-    const endTime = tracking.maxTime ? new Date(tracking.maxTime).toISOString() : new Date().toISOString();
+  const finalizeFill = async (plate, tracking) => {
+    if (tracking.preFill === null || tracking.preFill === undefined ||
+        tracking.postFill === null || tracking.postFill === undefined) {
+      console.log(`[geozone] INCOMPLETE FILL DATA: ${plate} - pre: ${tracking.preFill}, post: ${tracking.postFill} (discarded)`);
+      delete geozoneTracking[plate];
+      return;
+    }
 
-    console.log(`[geozone] FILL RECORDED: ${plate} at "${tracking.zoneName}" - ${tracking.minFuel}L -> ${tracking.maxFuel}L = +${diff.toFixed(1)}L`);
+    const fill = tracking.postFill - tracking.preFill;
+    await recordGeozoneFill(plate, tracking, fill);
+    delete geozoneTracking[plate];
+  };
+
+  const recordGeozoneFill = async (plate, tracking, fill) => {
+    const sessionDate = tracking.zoneEnterTime ? String(tracking.zoneEnterTime).split('T')[0] : new Date().toISOString().split('T')[0];
+    const startTime = tracking.preFillLocTime ? new Date(tracking.preFillLocTime).toISOString() : new Date().toISOString();
+    const endTime = tracking.postFillLocTime ? new Date(tracking.postFillLocTime).toISOString() : new Date().toISOString();
+
+    console.log(`[geozone] FILL RECORDED: ${plate} at "${tracking.zoneName}" - ${tracking.preFill}L -> ${tracking.postFill}L = ${fill.toFixed(1)}L`);
 
     try {
       await db.insertFillSession({
@@ -307,24 +295,24 @@ const createClient = (wsUrl) => {
         session_start_time: startTime,
         session_end_time: endTime,
         operating_hours: 0,
-        opening_fuel: tracking.minFuel,
+        opening_fuel: tracking.preFill,
         opening_fuel_probe_1: 0,
         opening_fuel_probe_2: 0,
         opening_percentage: 0,
         opening_percentage_probe_1: 0,
         opening_percentage_probe_2: 0,
-        closing_fuel: tracking.maxFuel,
+        closing_fuel: tracking.postFill,
         closing_fuel_probe_1: 0,
         closing_fuel_probe_2: 0,
         closing_percentage: 0,
         closing_percentage_probe_1: 0,
         closing_percentage_probe_2: 0,
-        total_fill: diff,
+        total_fill: fill,
         total_usage: 0,
         fill_events: 1,
-        fill_amount_during_session: diff,
+        fill_amount_during_session: fill,
         session_status: 'FUEL_FILL_COMPLETED',
-        notes: `Geozone fill at "${tracking.zoneName}". Min: ${tracking.minFuel}L (${tracking.minTime}), Max: ${tracking.maxFuel}L (${tracking.maxTime}), Filled: ${diff.toFixed(1)}L | zone_id: ${tracking.fuelStopId} | detection: geozone`,
+        notes: `Geozone fill at "${tracking.zoneName}". Pre: ${tracking.preFill}L (${tracking.preFillLocTime}), Post: ${tracking.postFill}L (${tracking.postFillLocTime}), Diff: ${fill.toFixed(1)}L | zone_id: ${tracking.fuelStopId} | detection: geozone-minmax`,
       });
 
       await db.insertGeozoneEvent({
@@ -332,15 +320,15 @@ const createClient = (wsUrl) => {
         fuel_stop_id: tracking.fuelStopId,
         geozone_name: tracking.zoneName,
         event_type: 'FILL_DETECTED',
-        loc_time: tracking.maxTime,
-        latitude: 0,
-        longitude: 0,
-        fuel_before: tracking.minFuel,
-        fuel_after: tracking.maxFuel,
-        fill_amount: diff,
+        loc_time: tracking.postFillLocTime,
+        latitude: tracking.exitLatitude ?? 0,
+        longitude: tracking.exitLongitude ?? 0,
+        fuel_before: tracking.preFill,
+        fuel_after: tracking.postFill,
+        fill_amount: fill,
       });
 
-      await insertFuelReviewAction(plate, 'fill', diff, tracking.minFuel, tracking.maxFuel, tracking.maxTime, `zone: ${tracking.zoneName} | min: ${tracking.minFuel}L | max: ${tracking.maxFuel}L | detection: geozone`);
+      await insertFuelReviewAction(plate, 'fill', fill, tracking.preFill, tracking.postFill, tracking.postFillLocTime, `zone: ${tracking.zoneName} | pre: ${tracking.preFill}L | post: ${tracking.postFill}L | detection: geozone-minmax`);
     } catch (err) {
       console.error(`[geozone] Failed to record fill for ${plate}: ${err.message}`);
     }
@@ -506,11 +494,6 @@ const createClient = (wsUrl) => {
     if (reconnectTimer) {
       clearTimeout(reconnectTimer);
       reconnectTimer = null;
-    }
-    for (const plate of Object.keys(geozoneTracking)) {
-      if (geozoneTracking[plate].retryTimer) {
-        clearTimeout(geozoneTracking[plate].retryTimer);
-      }
     }
     if (ws) {
       ws.close();
