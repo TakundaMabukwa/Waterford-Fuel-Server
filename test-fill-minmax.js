@@ -36,8 +36,8 @@ require.cache[geoPath] = {
   exports: {
     findFuelStop: async (lat, lon) =>
       (lat === 10 && lon === 10 ? { id: 7, name: 'TEST STOP', geozone_name: 'TEST STOP' } : null),
-    insertFuelReviewAction: async (plate, type, amount, base, cur, locTime) => {
-      state.reviewActions.push({ plate, type, amount, base, cur, locTime });
+    insertFuelReviewAction: async (plate, type, amount, locTime) => {
+      state.reviewActions.push({ plate, type, amount, locTime });
     },
     syncFuelStops: async () => 0,
   },

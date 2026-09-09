@@ -116,7 +116,7 @@ const findFuelStop = async (lat, lon) => {
   }
 };
 
-const insertFuelReviewAction = async (plate, actionType, amount, baselineFuel, currentFuel, locTime, context) => {
+const insertFuelReviewAction = async (plate, actionType, amount, locTime, context) => {
   if (!waterfordSupabase) {
     console.warn('[geozone] Skipping fuel_review_actions insert - no WATERFORD Supabase client');
     return;
@@ -131,7 +131,7 @@ const insertFuelReviewAction = async (plate, actionType, amount, baselineFuel, c
         vehicle_reg: plate,
         review_date: reviewDate,
         action_type: actionType,
-        probe_value: `${amount.toFixed(1)}L (${baselineFuel.toFixed(1)}L -> ${currentFuel.toFixed(1)}L)`,
+        probe_value: `${amount.toFixed(1)}L`,
         notes: `loc_time: ${locTime} | ${context}`,
       }, { onConflict: 'vehicle_reg,review_date,action_type' });
 

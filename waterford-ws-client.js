@@ -328,7 +328,7 @@ const createClient = (wsUrl) => {
         fill_amount: fill,
       });
 
-      await insertFuelReviewAction(plate, 'fill', fill, tracking.preFill, tracking.postFill, tracking.postFillLocTime, `zone: ${tracking.zoneName} | pre: ${tracking.preFill}L | post: ${tracking.postFill}L | detection: geozone-minmax`);
+      await insertFuelReviewAction(plate, 'fill', fill, tracking.postFillLocTime, `zone: ${tracking.zoneName} | pre: ${tracking.preFill}L | post: ${tracking.postFill}L | detection: geozone-minmax`);
     } catch (err) {
       console.error(`[geozone] Failed to record fill for ${plate}: ${err.message}`);
     }
@@ -442,7 +442,7 @@ const createClient = (wsUrl) => {
         notes: `Theft detected. Baseline: ${monitoring.baselineFuel}L (${monitoring.baselineTime}), Lowest: ${monitoring.lowestFuel}L (${monitoring.lowestTime}), Lost: ${theftAmount.toFixed(1)}L | detection: engine-off monitoring`,
       });
 
-      await insertFuelReviewAction(plate, 'theft', theftAmount, monitoring.baselineFuel, monitoring.lowestFuel, monitoring.lowestTime, `baseline: ${monitoring.baselineFuel}L | lowest: ${monitoring.lowestFuel}L | detection: engine-off monitoring`);
+      await insertFuelReviewAction(plate, 'theft', theftAmount, monitoring.lowestTime, `baseline: ${monitoring.baselineFuel}L | lowest: ${monitoring.lowestFuel}L | detection: engine-off monitoring`);
     } catch (err) {
       console.error(`[theft] Failed to record theft for ${plate}: ${err.message}`);
     }
