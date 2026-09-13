@@ -16,27 +16,29 @@ const pool = new Pool({
   password: process.env.PGPASSWORD,
 });
 
+const VERBOSE = process.argv.includes('--verbose') || process.argv.includes('-v');
+
 const isDate = (s) => /^\d{4}-\d{2}-\d{2}/.test(s);
 let TARGET_PLATE = null;
 let START_DATE = '2026-09-01';
 let END_DATE = '2026-09-30';
 
-const args = process.argv.slice(2);
-if (args.length === 0) {
+const rawArgs = process.argv.slice(2).filter(a => !a.startsWith('-'));
+if (rawArgs.length === 0) {
   // all vehicles, default dates
-} else if (args.length === 1) {
-  if (isDate(args[0])) { START_DATE = args[0]; }
-  else { TARGET_PLATE = args[0]; }
-} else if (args.length === 2) {
-  if (isDate(args[0]) && isDate(args[1])) {
-    START_DATE = args[0]; END_DATE = args[1];
-  } else if (isDate(args[1])) {
-    TARGET_PLATE = args[0]; START_DATE = args[1];
+} else if (rawArgs.length === 1) {
+  if (isDate(rawArgs[0])) { START_DATE = rawArgs[0]; }
+  else { TARGET_PLATE = rawArgs[0]; }
+} else if (rawArgs.length === 2) {
+  if (isDate(rawArgs[0]) && isDate(rawArgs[1])) {
+    START_DATE = rawArgs[0]; END_DATE = rawArgs[1];
+  } else if (isDate(rawArgs[1])) {
+    TARGET_PLATE = rawArgs[0]; START_DATE = rawArgs[1];
   } else {
-    TARGET_PLATE = args[0]; END_DATE = args[1];
+    TARGET_PLATE = rawArgs[0]; END_DATE = rawArgs[1];
   }
 } else {
-  TARGET_PLATE = args[0]; START_DATE = args[1]; END_DATE = args[2];
+  TARGET_PLATE = rawArgs[0]; START_DATE = rawArgs[1]; END_DATE = rawArgs[2];
 }
 const MIN_FILL = 10;
 
@@ -141,7 +143,7 @@ async function replayVehicle(plate, fuelStops) {
         exitLongitude: null,
       };
       results.enters++;
-      console.log(`  ENTER: ${plate} into "${tracking.zoneName}" at ${msg.loc_time} fuel=${fuel}L preFill=${preFill}L`);
+      if (VERBOSE) console.log(`  ENTER: ${plate} into "${tracking.zoneName}" at ${msg.loc_time} fuel=${fuel}L preFill=${preFill}L`);
       continue;
     }
 
@@ -182,12 +184,14 @@ async function replayVehicle(plate, fuelStops) {
           };
           results.fills.push(entry);
           console.log(`  FILL: ${plate} at "${tracking.zoneName}" - ${tracking.preFill}L -> ${postFill}L = ${fill.toFixed(1)}L`);
-        } else if (fill > 0) {
-          console.log(`  SKIP: ${plate} at "${tracking.zoneName}" - ${tracking.preFill}L -> ${postFill}L = ${fill.toFixed(1)}L (below ${MIN_FILL}L)`);
-        } else {
-          console.log(`  SKIP: ${plate} at "${tracking.zoneName}" - ${tracking.preFill}L -> ${postFill}L = ${fill.toFixed(1)}L (no fill)`);
+        } else if (VERBOSE) {
+          if (fill > 0) {
+            console.log(`  SKIP: ${plate} at "${tracking.zoneName}" - ${tracking.preFill}L -> ${postFill}L = ${fill.toFixed(1)}L (below ${MIN_FILL}L)`);
+          } else {
+            console.log(`  SKIP: ${plate} at "${tracking.zoneName}" - ${tracking.preFill}L -> ${postFill}L = ${fill.toFixed(1)}L (no fill)`);
+          }
         }
-      } else {
+      } else if (VERBOSE) {
         console.log(`  SKIP: ${plate} at "${tracking.zoneName}" - pre=${tracking.preFill} post=${postFill} (incomplete data)`);
       }
 
@@ -199,7 +203,7 @@ async function replayVehicle(plate, fuelStops) {
     if (wasInZone && isInZone && tracking.preFill === null && fuel > 0) {
       tracking.preFill = fuel;
       tracking.preFillLocTime = locTime;
-      console.log(`  PRE-FILL SET: ${plate} - ${fuel}L at ${msg.loc_time}`);
+      if (VERBOSE) console.log(`  PRE-FILL SET: ${plate} - ${fuel}L at ${msg.loc_time}`);
     }
   }
 
@@ -241,7 +245,9 @@ async function run() {
       totalFills += result.fills.length;
       totalEnters += result.enters;
       totalExits += result.exits;
-      console.log(`  => ${plate}: ${result.fills.length} fills (${result.totalMessages} messages, ${result.enters} enters, ${result.exits} exits)\n`);
+      if (result.fills.length > 0 || VERBOSE) {
+        console.log(`  => ${plate}: ${result.fills.length} fills (${result.totalMessages} msgs, ${result.enters} enters, ${result.exits} exits)`);
+      }
     }
   }
 
