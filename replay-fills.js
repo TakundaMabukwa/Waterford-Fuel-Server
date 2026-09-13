@@ -93,17 +93,35 @@ async function replayVehicle(plate, fuelStops) {
 
     // Zone entry
     if (!wasInZone && isInZone) {
+      let preFill = fuel > 0 ? fuel : null;
+      let preFillLocTime = fuel > 0 ? locTime : null;
+
+      // DB fallback: last fuel reading before entry
+      if (!preFill) {
+        const { rows: fb } = await pool.query(`
+          SELECT fuel_probe_1_volume_in_tank, fuel_probe_2_volume_in_tank, loc_time
+          FROM vehicle_history
+          WHERE plate = $1 AND loc_time < $2
+            AND (fuel_probe_1_volume_in_tank > 0 OR fuel_probe_2_volume_in_tank > 0)
+          ORDER BY loc_time::timestamptz DESC LIMIT 1
+        `, [plate, locTime]);
+        if (fb.length > 0) {
+          preFill = combinedFuel(fb[0]);
+          preFillLocTime = locTimeToISO(fb[0].loc_time);
+        }
+      }
+
       tracking = {
         fuelStopId: fuelStop.id,
         zoneName: fuelStop.name || fuelStop.geozone_name || 'Unknown',
         zoneEnterTime: locTime,
-        preFill: fuel > 0 ? fuel : null,
-        preFillLocTime: fuel > 0 ? locTime : null,
+        preFill,
+        preFillLocTime,
         exitLatitude: null,
         exitLongitude: null,
       };
       results.enters++;
-      console.log(`  ENTER: ${plate} into "${tracking.zoneName}" at ${msg.loc_time} fuel=${fuel}L`);
+      console.log(`  ENTER: ${plate} into "${tracking.zoneName}" at ${msg.loc_time} fuel=${fuel}L preFill=${preFill}L`);
       continue;
     }
 
