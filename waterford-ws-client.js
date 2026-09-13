@@ -47,7 +47,7 @@ const createClient = (wsUrl) => {
       speed: msg.speed,
       latitude: msg.latitude,
       longitude: msg.longitude,
-      loc_time: msg.loc_time,
+      loc_time: msg.loc_time?.includes('T') ? msg.loc_time : (msg.loc_time || '') + '+00:00',
       mileage: msg.mileage,
       pocsagstr: msg.pocsagstr,
       status: msg.status,
@@ -160,20 +160,6 @@ const createClient = (wsUrl) => {
     const isInZone = fuelStop !== null;
     const msgFuel = getCombinedFuel(decoded);
 
-    if (tracking && tracking.waitingPostFill) {
-      if (msgFuel > 0) {
-        tracking.postFill = msgFuel;
-        tracking.postFillLocTime = msg.loc_time;
-        tracking.waitingPostFill = false;
-        await finalizeFill(plate, tracking);
-        tracking = geozoneTracking[plate] || null;
-      } else if (isInZone) {
-        return;
-      } else {
-        return;
-      }
-    }
-
     const wasInZone = tracking && tracking.inZone;
 
     if (!wasInZone && isInZone) {
@@ -188,7 +174,6 @@ const createClient = (wsUrl) => {
         postFillLocTime: null,
         exitLatitude: null,
         exitLongitude: null,
-        waitingPostFill: false,
       };
 
       console.log(`[geozone] ZONE ENTER: ${plate} entered "${fuelStop.name}" at ${msg.loc_time}`);
@@ -203,7 +188,7 @@ const createClient = (wsUrl) => {
         longitude: msg.longitude,
       });
 
-      await initPreFill(plate);
+      await initPreFill(plate, msgFuel);
       return;
     }
 
@@ -226,44 +211,44 @@ const createClient = (wsUrl) => {
       if (msgFuel > 0) {
         tracking.postFill = msgFuel;
         tracking.postFillLocTime = msg.loc_time;
-        await finalizeFill(plate, tracking);
       } else {
-        tracking.inZone = false;
-        tracking.waitingPostFill = true;
+        const row = await db.getLatestFuelBefore(plate, msg.loc_time);
+        if (row) {
+          tracking.postFill = combinedFuelFromRow(row);
+          tracking.postFillLocTime = row.loc_time;
+        }
       }
+      await finalizeFill(plate, tracking);
       return;
     }
 
     if (!wasInZone || !isInZone) return;
 
     if (tracking.preFill === null) {
-      await initPreFill(plate);
+      await initPreFill(plate, msgFuel);
     }
   };
 
-  const initPreFill = async (plate) => {
+  const initPreFill = async (plate, msgFuel) => {
     const tracking = geozoneTracking[plate];
     if (!tracking) return;
 
-    const rows = await db.getLastNFuelReadings(plate, 5);
-    if (!rows || rows.length === 0) {
-      console.log(`[geozone] NO PRE-FILL DATA: ${plate} - retrying on next in-zone message`);
+    if (msgFuel > 0) {
+      tracking.preFill = msgFuel;
+      tracking.preFillLocTime = tracking.zoneEnterTime;
+      console.log(`[geozone] PRE-FILL SET: ${plate} - ${msgFuel}L at entry`);
       return;
     }
 
-    let min = null;
-    let minTime = null;
-    for (const r of rows) {
-      const f = combinedFuelFromRow(r);
-      if (min === null || f < min) {
-        min = f;
-        minTime = r.loc_time;
-      }
+    const row = await db.getLatestFuelBefore(plate, tracking.zoneEnterTime);
+    if (row) {
+      const f = combinedFuelFromRow(row);
+      tracking.preFill = f;
+      tracking.preFillLocTime = row.loc_time;
+      console.log(`[geozone] PRE-FILL SET: ${plate} - ${f}L (from ${row.loc_time})`);
+    } else {
+      console.log(`[geozone] NO PRE-FILL DATA: ${plate} - will discard at exit`);
     }
-
-    tracking.preFill = min;
-    tracking.preFillLocTime = minTime;
-    console.log(`[geozone] PRE-FILL SET: ${plate} - lowest of last ${rows.length}: ${min}L at ${minTime}`);
   };
 
   const finalizeFill = async (plate, tracking) => {
@@ -275,6 +260,19 @@ const createClient = (wsUrl) => {
     }
 
     const fill = tracking.postFill - tracking.preFill;
+
+    if (fill <= 0) {
+      console.log(`[geozone] NO FILL: ${plate} - ${tracking.preFill}L -> ${tracking.postFill}L = ${fill.toFixed(1)}L (discarded)`);
+      delete geozoneTracking[plate];
+      return;
+    }
+
+    if (fill < 10) {
+      console.log(`[geozone] BELOW THRESHOLD: ${plate} - ${tracking.preFill}L -> ${tracking.postFill}L = ${fill.toFixed(1)}L (discarded)`);
+      delete geozoneTracking[plate];
+      return;
+    }
+
     await recordGeozoneFill(plate, tracking, fill);
     delete geozoneTracking[plate];
   };

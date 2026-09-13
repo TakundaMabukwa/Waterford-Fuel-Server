@@ -412,17 +412,18 @@ const getLatestFuelReading = async (plate) => {
   return rows.length > 0 ? rows[0] : null;
 };
 
-const getLastNFuelReadings = async (plate, count) => {
+const getLatestFuelBefore = async (plate, beforeTime) => {
   const sql = `
     SELECT fuel_probe_1_volume_in_tank, fuel_probe_2_volume_in_tank, loc_time, created_at
     FROM vehicle_history
     WHERE plate = $1
+      AND loc_time < $2
       AND (fuel_probe_1_volume_in_tank > 0 OR fuel_probe_2_volume_in_tank > 0)
-    ORDER BY created_at DESC
-    LIMIT $2
+    ORDER BY loc_time::timestamptz DESC
+    LIMIT 1
   `;
-  const { rows } = await query(sql, [plate, count]);
-  return rows.reverse();
+  const { rows } = await query(sql, [plate, beforeTime]);
+  return rows.length > 0 ? rows[0] : null;
 };
 
 const getOngoingSession = async (plate) => {
@@ -489,7 +490,7 @@ const close = async () => {
 module.exports = {
   init, close, query, isKnownVehicle, getCostCode, insertHistory, upsertLatest,
   insertFillSession, insertTheftSession,
-  upsertFuelStop, insertGeozoneEvent, getLastNFuelReadings,
+  upsertFuelStop, insertGeozoneEvent, getLatestFuelBefore,
   getOngoingSession, insertOperatingSession, closeOperatingSession,
   getLatestFuelReading
 };

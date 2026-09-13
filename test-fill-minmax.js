@@ -20,8 +20,10 @@ require.cache[dbPath] = {
     getCostCode: () => 'WATE-0001',
     insertHistory: async (row) => { state.history.push(row); },
     upsertLatest: async () => {},
-    getLastNFuelReadings: async (plate, n) =>
-      state.history.filter((h) => h.plate === plate && combinedOf(h) > 0).slice(-n),
+    getLatestFuelBefore: async (plate, beforeTime) => {
+      const fuelRows = state.history.filter((h) => h.plate === plate && combinedOf(h) > 0 && h.loc_time < beforeTime);
+      return fuelRows.length > 0 ? fuelRows[fuelRows.length - 1] : null;
+    },
     insertFillSession: async (s) => { state.fills.push(s); },
     insertTheftSession: async (s) => { state.thefts.push(s); },
     insertGeozoneEvent: async (e) => { state.geoEvents.push(e); },
@@ -77,7 +79,7 @@ async function run() {
     msg('S1', 5, 5, 7, 700),
   ]);
 
-  // Scenario 2: exit without fuel -> wait for next fuel msg. Expect fill 600-290=310.
+  // Scenario 2: exit without fuel -> DB fallback gets last reading before exit = entry reading. No fill.
   await sendAll(socket, [
     msg('S2', 5, 5, 10, 300), msg('S2', 5, 5, 11, 300), msg('S2', 5, 5, 12, 300),
     msg('S2', 5, 5, 13, 300), msg('S2', 5, 5, 14, 300),
@@ -119,18 +121,16 @@ async function run() {
   assert.strictEqual(fillsFor('S1')[0].closing_fuel, 700, 'S1 postFill = exit msg fuel');
   assert.strictEqual(fillsFor('S1')[0].total_fill, 220, 'S1 fill = 220');
 
-  assert.strictEqual(fillsFor('S2').length, 1, 'S2 one fill');
-  assert.strictEqual(fillsFor('S2')[0].opening_fuel, 290, 'S2 preFill');
-  assert.strictEqual(fillsFor('S2')[0].closing_fuel, 600, 'S2 postFill = first fuel after exit');
-  assert.strictEqual(fillsFor('S2')[0].total_fill, 310, 'S2 fill = 310');
+  assert.strictEqual(fillsFor('S2').length, 0, 'S2 no fill - exit without fuel, DB fallback returns entry reading');
 
   assert.strictEqual(fillsFor('S3').length, 1, 'S3 one fill');
   assert.strictEqual(fillsFor('S3')[0].opening_fuel, 200, 'S3 preFill via retry');
   assert.strictEqual(fillsFor('S3')[0].total_fill, 300, 'S3 fill = 300');
 
-  assert.strictEqual(fillsFor('S4').length, 2, 'S4 two fills');
-  assert.strictEqual(fillsFor('S4')[0].total_fill, 310, 'S4 first fill = 400-90');
-  assert.strictEqual(fillsFor('S4')[1].total_fill, 410, 'S4 second fill = 500-90');
+  assert.strictEqual(fillsFor('S4').length, 1, 'S4 one fill (first exit discarded, second captured)');
+  assert.strictEqual(fillsFor('S4')[0].opening_fuel, 400, 'S4 preFill = entry fuel at re-enter');
+  assert.strictEqual(fillsFor('S4')[0].closing_fuel, 500, 'S4 postFill = exit fuel');
+  assert.strictEqual(fillsFor('S4')[0].total_fill, 100, 'S4 fill = 500-400 = 100');
 
   assert.strictEqual(fillsFor('S5').length, 0, 'S5 no fill without preFill');
 
@@ -141,7 +141,7 @@ async function run() {
   const detected = state.geoEvents.filter((e) => e.event_type === 'FILL_DETECTED').length;
   assert.strictEqual(enters, 6, 'six zone enters (S4 enters twice)');
   assert.strictEqual(exits, 6, 'six zone exits (S4 exits twice)');
-  assert.strictEqual(detected, 5, 'five FILL_DETECTED events');
+  assert.strictEqual(detected, 3, 'three FILL_DETECTED events (S1, S3, S4)');
 
   console.log('ALL FILL-MINMAX TESTS PASSED');
   console.log(`fills=${state.fills.length} reviewActions=${state.reviewActions.length} enters=${enters} exits=${exits} detected=${detected}`);
