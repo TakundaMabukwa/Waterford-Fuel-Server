@@ -6,6 +6,7 @@
 //   node replay-fills.js (all vehicles, Sep 1-30)
 
 const { Pool } = require('pg');
+const { createClient } = require('@supabase/supabase-js');
 const booleanPointInPolygon = require('@turf/boolean-point-in-polygon').default;
 
 const pool = new Pool({
@@ -16,6 +17,13 @@ const pool = new Pool({
   password: process.env.PGPASSWORD,
 });
 
+const WATERFORD_URL = process.env.WATERFORD_SUPABASE_URL;
+const WATERFORD_KEY = process.env.WATERFORD_SUPABASE_SERVICE_ROLE_KEY || process.env.WATERFORD_SUPABASE_ANON_KEY;
+const waterfordSupabase = (WATERFORD_URL && WATERFORD_KEY)
+  ? createClient(WATERFORD_URL, WATERFORD_KEY, { auth: { persistSession: false } })
+  : null;
+
+const DRY_RUN = process.argv.includes('--dry-run');
 const VERBOSE = process.argv.includes('--verbose') || process.argv.includes('-v');
 
 const isDate = (s) => /^\d{4}-\d{2}-\d{2}/.test(s);
@@ -41,6 +49,30 @@ if (rawArgs.length === 0) {
   TARGET_PLATE = rawArgs[0]; START_DATE = rawArgs[1]; END_DATE = rawArgs[2];
 }
 const MIN_FILL = 10;
+
+const insertFuelReviewAction = async (plate, amount, locTime, zoneName, preFill, postFill) => {
+  if (!waterfordSupabase) return;
+  if (DRY_RUN) {
+    console.log(`  [DRY RUN] Would insert: ${plate} | ${locTime.split('T')[0]} | fill | ${amount.toFixed(1)}L`);
+    return;
+  }
+  try {
+    const reviewDate = locTime ? locTime.split('T')[0] : new Date().toISOString().split('T')[0];
+    const { error } = await waterfordSupabase
+      .from('fuel_review_actions')
+      .upsert({
+        vehicle_reg: plate,
+        review_date: reviewDate,
+        action_type: 'fill',
+        probe_value: `${amount.toFixed(1)}L`,
+        notes: `loc_time: ${locTime} | zone: ${zoneName} | pre: ${preFill}L | post: ${postFill}L | detection: replay-backfill`,
+      }, { onConflict: 'vehicle_reg,review_date,action_type' });
+    if (error) throw error;
+    console.log(`  INSERTED: ${plate} on ${reviewDate} - ${amount.toFixed(1)}L`);
+  } catch (err) {
+    console.error(`  FAILED to insert ${plate}: ${err.message}`);
+  }
+};
 
 const combinedFuel = (row) =>
   (row.fuel_probe_1_volume_in_tank || 0) + (row.fuel_probe_2_volume_in_tank || 0);
@@ -184,6 +216,7 @@ async function replayVehicle(plate, fuelStops) {
           };
           results.fills.push(entry);
           console.log(`  FILL: ${plate} at "${tracking.zoneName}" - ${tracking.preFill}L -> ${postFill}L = ${fill.toFixed(1)}L`);
+          await insertFuelReviewAction(plate, fill, tracking.postFillLocTime || locTime, tracking.zoneName, tracking.preFill, postFill);
         } else if (VERBOSE) {
           if (fill > 0) {
             console.log(`  SKIP: ${plate} at "${tracking.zoneName}" - ${tracking.preFill}L -> ${postFill}L = ${fill.toFixed(1)}L (below ${MIN_FILL}L)`);
