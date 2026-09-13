@@ -1,8 +1,9 @@
 // Historical replay tool — feeds real vehicle data through fill detection logic.
-// Run on droplet: node replay-fills.js [plate] [date]
+// Run on droplet: node replay-fills.js [plate] [start] [end]
 // Examples:
-//   node replay-fills.js KP48NCGP 2026-09-12
-//   node replay-fills.js (all vehicles, last 7 days)
+//   node replay-fills.js KP48NCGP 2026-09-10 2026-09-13
+//   node replay-fills.js 2026-09-01 2026-09-30  (all vehicles, date range)
+//   node replay-fills.js (all vehicles, Sep 1-30)
 
 const { Pool } = require('pg');
 const booleanPointInPolygon = require('@turf/boolean-point-in-polygon').default;
@@ -15,9 +16,28 @@ const pool = new Pool({
   password: process.env.PGPASSWORD,
 });
 
-const TARGET_PLATE = process.argv[2] || null;
-const START_DATE = process.argv[3] || '2026-09-01';
-const END_DATE = process.argv[4] || '2026-09-30';
+const isDate = (s) => /^\d{4}-\d{2}-\d{2}/.test(s);
+let TARGET_PLATE = null;
+let START_DATE = '2026-09-01';
+let END_DATE = '2026-09-30';
+
+const args = process.argv.slice(2);
+if (args.length === 0) {
+  // all vehicles, default dates
+} else if (args.length === 1) {
+  if (isDate(args[0])) { START_DATE = args[0]; }
+  else { TARGET_PLATE = args[0]; }
+} else if (args.length === 2) {
+  if (isDate(args[0]) && isDate(args[1])) {
+    START_DATE = args[0]; END_DATE = args[1];
+  } else if (isDate(args[1])) {
+    TARGET_PLATE = args[0]; START_DATE = args[1];
+  } else {
+    TARGET_PLATE = args[0]; END_DATE = args[1];
+  }
+} else {
+  TARGET_PLATE = args[0]; START_DATE = args[1]; END_DATE = args[2];
+}
 const MIN_FILL = 10;
 
 const combinedFuel = (row) =>
