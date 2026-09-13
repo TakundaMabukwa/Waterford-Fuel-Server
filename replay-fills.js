@@ -16,7 +16,8 @@ const pool = new Pool({
 });
 
 const TARGET_PLATE = process.argv[2] || null;
-const TARGET_DATE = process.argv[3] || null;
+const START_DATE = process.argv[3] || '2026-09-01';
+const END_DATE = process.argv[4] || '2026-09-30';
 const MIN_FILL = 10;
 
 const combinedFuel = (row) =>
@@ -62,9 +63,9 @@ async function replayVehicle(plate, fuelStops) {
   let where = `plate = $1`;
   const params = [plate];
 
-  if (TARGET_DATE) {
+  if (START_DATE) {
     where += ` AND loc_time >= $2 AND loc_time <= $3`;
-    params.push(TARGET_DATE + ' 00:00:00', TARGET_DATE + ' 23:59:59');
+    params.push(START_DATE + ' 00:00:00', END_DATE + ' 23:59:59');
   }
 
   const { rows: messages } = await pool.query(`
@@ -169,7 +170,7 @@ async function replayVehicle(plate, fuelStops) {
 
 async function run() {
   console.log('=== FILL DETECTION REPLAY ===');
-  console.log(`Plate: ${TARGET_PLATE || 'ALL'} | Date: ${TARGET_DATE || 'ALL'}`);
+  console.log(`Plate: ${TARGET_PLATE || 'ALL'} | Date: ${START_DATE} to ${END_DATE}`);
   console.log();
 
   // Load fuel stops
