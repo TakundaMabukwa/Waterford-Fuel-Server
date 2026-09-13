@@ -417,7 +417,7 @@ const getLatestFuelBefore = async (plate, beforeTime) => {
     SELECT fuel_probe_1_volume_in_tank, fuel_probe_2_volume_in_tank, loc_time, created_at
     FROM vehicle_history
     WHERE plate = $1
-      AND loc_time < $2
+      AND loc_time::timestamptz < $2::timestamptz
       AND (fuel_probe_1_volume_in_tank > 0 OR fuel_probe_2_volume_in_tank > 0)
     ORDER BY loc_time::timestamptz DESC
     LIMIT 1
