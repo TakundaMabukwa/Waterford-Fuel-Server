@@ -36,6 +36,29 @@ app.get('/health', (req, res) => {
   });
 });
 
+app.post('/api/fuel-stops/sync', async (req, res) => {
+  try {
+    const count = await syncFuelStops();
+    const { rows } = await db.query('SELECT COUNT(*) as total FROM fuel_stops');
+    res.json({
+      synced: count,
+      total: parseInt(rows[0].total),
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/fuel-stops', async (req, res) => {
+  try {
+    const { rows } = await db.query('SELECT * FROM fuel_stops ORDER BY name');
+    res.json({ count: rows.length, stops: rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Vehicle latest endpoints
 app.get('/api/vehicles', async (req, res) => {
   try {
