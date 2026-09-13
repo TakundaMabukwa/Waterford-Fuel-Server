@@ -61,11 +61,17 @@ const syncFuelStops = async () => {
       synced++;
     }
 
-    const { rowCount: removed } = await db.query(
-      `DELETE FROM fuel_stops WHERE id <> ALL($1::bigint[])`,
-      [syncedIds]
-    );
-    if (removed) console.log(`[geozone] Removed ${removed} stale rows not in Supabase`);
+    if (syncedIds.length > 0) {
+      await db.query(
+        `DELETE FROM geozone_events WHERE fuel_stop_id <> ALL($1::bigint[])`,
+        [syncedIds]
+      );
+      const { rowCount: removed } = await db.query(
+        `DELETE FROM fuel_stops WHERE id <> ALL($1::bigint[])`,
+        [syncedIds]
+      );
+      if (removed) console.log(`[geozone] Removed ${removed} stale rows not in Supabase`);
+    }
 
     console.log(`[geozone] Synced ${synced} fuel stops from WATERFORD Supabase`);
     cachedFuelStops = null;
