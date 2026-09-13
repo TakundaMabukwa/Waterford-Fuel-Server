@@ -1,0 +1,228 @@
+// Historical replay tool — feeds real vehicle data through fill detection logic.
+// Run on droplet: node replay-fills.js [plate] [date]
+// Examples:
+//   node replay-fills.js KP48NCGP 2026-09-12
+//   node replay-fills.js (all vehicles, last 7 days)
+
+const { Pool } = require('pg');
+const booleanPointInPolygon = require('@turf/boolean-point-in-polygon').default;
+
+const pool = new Pool({
+  host: process.env.PGHOST || 'localhost',
+  port: parseInt(process.env.PGPORT || '5432', 10),
+  database: process.env.PGDATABASE || 'fuel_table',
+  user: process.env.PGUSER || 'postgres',
+  password: process.env.PGPASSWORD,
+});
+
+const TARGET_PLATE = process.argv[2] || null;
+const TARGET_DATE = process.argv[3] || null;
+const MIN_FILL = 10;
+
+const combinedFuel = (row) =>
+  (row.fuel_probe_1_volume_in_tank || 0) + (row.fuel_probe_2_volume_in_tank || 0);
+
+const locTimeToISO = (t) => {
+  if (!t) return null;
+  if (t.includes('T')) return t;
+  return t + '+00:00';
+};
+
+function pointInPolygon(lat, lon, polygon) {
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const xi = polygon[i][0], yi = polygon[i][1];
+    const xj = polygon[j][0], yj = polygon[j][1];
+    if ((yi > lat) !== (yj > lat) && lon < ((xj - xi) * (lat - yi)) / (yj - yi) + xi) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+function findFuelStop(lat, lon, fuelStops) {
+  for (const stop of fuelStops) {
+    let polygon = stop.coordinates;
+    if (typeof polygon === 'string') {
+      try { polygon = JSON.parse(polygon); } catch { continue; }
+    }
+    if (!Array.isArray(polygon) || polygon.length < 3) continue;
+    const closedRing = [...polygon, polygon[0]];
+    const turfPolygon = {
+      type: 'Feature',
+      geometry: { type: 'Polygon', coordinates: [closedRing] },
+      properties: {}
+    };
+    if (booleanPointInPolygon([lon, lat], turfPolygon)) return stop;
+  }
+  return null;
+}
+
+async function replayVehicle(plate, fuelStops) {
+  let where = `plate = $1`;
+  const params = [plate];
+
+  if (TARGET_DATE) {
+    where += ` AND loc_time >= $2 AND loc_time <= $3`;
+    params.push(TARGET_DATE + ' 00:00:00', TARGET_DATE + ' 23:59:59');
+  }
+
+  const { rows: messages } = await pool.query(`
+    SELECT id, plate, loc_time, latitude, longitude,
+      fuel_probe_1_volume_in_tank, fuel_probe_2_volume_in_tank,
+      status, message_type
+    FROM vehicle_history
+    WHERE ${where}
+      AND latitude IS NOT NULL AND longitude IS NOT NULL
+      AND latitude != 0 AND longitude != 0
+    ORDER BY created_at ASC
+  `, params);
+
+  if (messages.length === 0) return null;
+
+  let tracking = null;
+  const results = { plate, totalMessages: messages.length, fills: [], enters: 0, exits: 0 };
+
+  for (const msg of messages) {
+    const locTime = locTimeToISO(msg.loc_time);
+    const fuel = combinedFuel(msg);
+    const fuelStop = findFuelStop(msg.latitude, msg.longitude, fuelStops);
+    const isInZone = fuelStop !== null;
+    const wasInZone = tracking !== null;
+
+    // Zone entry
+    if (!wasInZone && isInZone) {
+      tracking = {
+        fuelStopId: fuelStop.id,
+        zoneName: fuelStop.name || fuelStop.geozone_name || 'Unknown',
+        zoneEnterTime: locTime,
+        preFill: fuel > 0 ? fuel : null,
+        preFillLocTime: fuel > 0 ? locTime : null,
+        exitLatitude: null,
+        exitLongitude: null,
+      };
+      results.enters++;
+      console.log(`  ENTER: ${plate} into "${tracking.zoneName}" at ${msg.loc_time} fuel=${fuel}L`);
+      continue;
+    }
+
+    // Zone exit
+    if (wasInZone && !isInZone) {
+      let postFill = fuel > 0 ? fuel : null;
+      let postFillLocTime = fuel > 0 ? locTime : null;
+
+      // DB fallback: last fuel reading before exit
+      if (!postFill) {
+        const { rows: fallback } = await pool.query(`
+          SELECT fuel_probe_1_volume_in_tank, fuel_probe_2_volume_in_tank, loc_time
+          FROM vehicle_history
+          WHERE plate = $1 AND loc_time < $2
+            AND (fuel_probe_1_volume_in_tank > 0 OR fuel_probe_2_volume_in_tank > 0)
+          ORDER BY loc_time::timestamptz DESC LIMIT 1
+        `, [plate, locTime]);
+        if (fallback.length > 0) {
+          postFill = combinedFuel(fallback[0]);
+          postFillLocTime = locTimeToISO(fallback[0].loc_time);
+        }
+      }
+
+      results.exits++;
+
+      if (tracking.preFill !== null && postFill !== null) {
+        const fill = postFill - tracking.preFill;
+
+        if (fill >= MIN_FILL) {
+          const entry = {
+            zone: tracking.zoneName,
+            zoneId: tracking.fuelStopId,
+            enterTime: tracking.zoneEnterTime,
+            exitTime: locTime,
+            preFill: tracking.preFill,
+            postFill,
+            fill: parseFloat(fill.toFixed(1)),
+          };
+          results.fills.push(entry);
+          console.log(`  FILL: ${plate} at "${tracking.zoneName}" - ${tracking.preFill}L -> ${postFill}L = ${fill.toFixed(1)}L`);
+        } else if (fill > 0) {
+          console.log(`  SKIP: ${plate} at "${tracking.zoneName}" - ${tracking.preFill}L -> ${postFill}L = ${fill.toFixed(1)}L (below ${MIN_FILL}L)`);
+        } else {
+          console.log(`  SKIP: ${plate} at "${tracking.zoneName}" - ${tracking.preFill}L -> ${postFill}L = ${fill.toFixed(1)}L (no fill)`);
+        }
+      } else {
+        console.log(`  SKIP: ${plate} at "${tracking.zoneName}" - pre=${tracking.preFill} post=${postFill} (incomplete data)`);
+      }
+
+      tracking = null;
+      continue;
+    }
+
+    // Inside zone — update preFill if still null
+    if (wasInZone && isInZone && tracking.preFill === null && fuel > 0) {
+      tracking.preFill = fuel;
+      tracking.preFillLocTime = locTime;
+      console.log(`  PRE-FILL SET: ${plate} - ${fuel}L at ${msg.loc_time}`);
+    }
+  }
+
+  return results;
+}
+
+async function run() {
+  console.log('=== FILL DETECTION REPLAY ===');
+  console.log(`Plate: ${TARGET_PLATE || 'ALL'} | Date: ${TARGET_DATE || 'ALL'}`);
+  console.log();
+
+  // Load fuel stops
+  const { rows: fuelStops } = await pool.query('SELECT * FROM fuel_stops WHERE coordinates IS NOT NULL');
+  console.log(`Loaded ${fuelStops.length} fuel stops`);
+
+  // Get plates to replay
+  let plates;
+  if (TARGET_PLATE) {
+    plates = [TARGET_PLATE.toUpperCase()];
+  } else {
+    const { rows } = await pool.query(`
+      SELECT DISTINCT plate FROM vehicle_history
+      WHERE (fuel_probe_1_volume_in_tank > 0 OR fuel_probe_2_volume_in_tank > 0)
+      ORDER BY plate
+    `);
+    plates = rows.map(r => r.plate);
+  }
+  console.log(`Replaying ${plates.length} vehicles\n`);
+
+  let totalFills = 0;
+  let totalEnters = 0;
+  let totalExits = 0;
+  const allResults = [];
+
+  for (const plate of plates) {
+    const result = await replayVehicle(plate, fuelStops);
+    if (result) {
+      allResults.push(result);
+      totalFills += result.fills.length;
+      totalEnters += result.enters;
+      totalExits += result.exits;
+      console.log(`  => ${plate}: ${result.fills.length} fills (${result.totalMessages} messages, ${result.enters} enters, ${result.exits} exits)\n`);
+    }
+  }
+
+  console.log('=== SUMMARY ===');
+  console.log(`Vehicles: ${plates.length} | Enters: ${totalEnters} | Exits: ${totalExits} | Fills detected: ${totalFills}`);
+
+  if (totalFills > 0) {
+    console.log('\nDetected fills:');
+    for (const r of allResults) {
+      for (const f of r.fills) {
+        console.log(`  ${r.plate} | ${f.zone} | ${f.enterTime} -> ${f.exitTime} | ${f.preFill}L -> ${f.postFill}L = ${f.fill}L`);
+      }
+    }
+  }
+
+  await pool.end();
+  process.exit(0);
+}
+
+run().catch((err) => {
+  console.error('ERROR:', err.message);
+  process.exit(1);
+});
