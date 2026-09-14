@@ -24,17 +24,12 @@ const createClient = (wsUrl) => {
     const plate = (parts[0] || '').trim();
     if (!plate) return null;
 
-    const rawLocTime = (parts[4] || '').trim();
-    const locTime = rawLocTime.includes('+') || rawLocTime.endsWith('Z')
-      ? rawLocTime
-      : rawLocTime + '+00:00';
-
     return {
       plate,
       speed: parseFloat(parts[1]) || 0,
       latitude: parseFloat(parts[2]) || 0,
       longitude: parseFloat(parts[3]) || 0,
-      loc_time: locTime,
+      loc_time: (parts[4] || '').trim(),
       mileage: parseInt(parts[5]) || 0,
       pocsagstr: (parts[6] || '').trim(),
       status: (parts[7] || '').trim(),
@@ -52,7 +47,7 @@ const createClient = (wsUrl) => {
       speed: msg.speed,
       latitude: msg.latitude,
       longitude: msg.longitude,
-      loc_time: msg.loc_time || '',
+      loc_time: msg.loc_time?.includes('T') ? msg.loc_time : (msg.loc_time || '') + '+00:00',
       mileage: msg.mileage,
       pocsagstr: msg.pocsagstr,
       status: msg.status,
@@ -283,8 +278,7 @@ const createClient = (wsUrl) => {
   };
 
   const recordGeozoneFill = async (plate, tracking, fill) => {
-    const rawTime = tracking.zoneEnterTime || new Date().toISOString();
-    const sessionDate = rawTime.split(/[T ]/)[0];
+    const sessionDate = tracking.zoneEnterTime ? String(tracking.zoneEnterTime).split('T')[0] : new Date().toISOString().split('T')[0];
     const startTime = tracking.preFillLocTime ? new Date(tracking.preFillLocTime).toISOString() : new Date().toISOString();
     const endTime = tracking.postFillLocTime ? new Date(tracking.postFillLocTime).toISOString() : new Date().toISOString();
 
@@ -413,8 +407,7 @@ const createClient = (wsUrl) => {
       return;
     }
 
-    const rawBaseTime = monitoring.baselineTime || new Date().toISOString();
-    const sessionDate = rawBaseTime.split(/[T ]/)[0];
+    const sessionDate = monitoring.baselineTime ? monitoring.baselineTime.split('T')[0] : new Date().toISOString().split('T')[0];
     const startTime = monitoring.baselineTime ? new Date(monitoring.baselineTime).toISOString() : new Date().toISOString();
     const endTime = monitoring.lowestTime ? new Date(monitoring.lowestTime).toISOString() : new Date().toISOString();
 
