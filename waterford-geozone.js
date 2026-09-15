@@ -133,13 +133,13 @@ const insertFuelReviewAction = async (plate, actionType, amount, locTime, contex
 
     const { error } = await waterfordSupabase
       .from('fuel_review_actions')
-      .upsert({
+      .insert({
         vehicle_reg: plate,
         review_date: reviewDate,
         action_type: actionType,
         probe_value: `${amount.toFixed(1)}L`,
         notes: `loc_time: ${locTime} | ${context}`,
-      }, { onConflict: 'vehicle_reg,review_date,action_type' });
+      });
 
     if (error) throw error;
     console.log(`[geozone] fuel_review_actions logged for ${plate} on ${reviewDate} (${actionType})`);

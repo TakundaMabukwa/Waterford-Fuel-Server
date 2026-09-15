@@ -60,13 +60,13 @@ const insertFuelReviewAction = async (plate, amount, locTime, zoneName, preFill,
     const reviewDate = locTime ? locTime.split('T')[0] : new Date().toISOString().split('T')[0];
     const { error } = await waterfordSupabase
       .from('fuel_review_actions')
-      .upsert({
+      .insert({
         vehicle_reg: plate,
         review_date: reviewDate,
         action_type: 'fill',
         probe_value: `${amount.toFixed(1)}L`,
         notes: `loc_time: ${locTime} | zone: ${zoneName} | pre: ${preFill}L | post: ${postFill}L | detection: replay-backfill`,
-      }, { onConflict: 'vehicle_reg,review_date,action_type' });
+      });
     if (error) throw error;
     console.log(`  INSERTED: ${plate} on ${reviewDate} - ${amount.toFixed(1)}L`);
   } catch (err) {
