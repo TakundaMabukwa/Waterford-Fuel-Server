@@ -1,11 +1,27 @@
 const db = require('../../waterford-db');
-const { findZone } = require('../../waterford-geozone');
 const { broadcastTripEvent } = require('./broadcaster');
 
 class TripTracker {
   constructor() {
-    // plate -> { tripId, stopStates: Map<zoneId, {inZone, sequence, zoneName}> }
+    // plate -> { tripId, stopStates: Map<zoneName, {inZone, sequence, zoneId, zoneName}> }
     this.tracking = new Map();
+    this.zoneCache = null;
+  }
+
+  async loadZoneCache() {
+    if (!this.zoneCache) {
+      const zones = await db.getAllZones();
+      this.zoneCache = new Map();
+      for (const zone of zones) {
+        this.zoneCache.set(zone.name, zone);
+      }
+    }
+  }
+
+  async getZoneIdByName(zoneName) {
+    await this.loadZoneCache();
+    const zone = this.zoneCache.get(zoneName);
+    return zone ? zone.id : null;
   }
 
   async processMessage(plate, msg, decoded) {
@@ -35,7 +51,7 @@ class TripTracker {
     // Check each stop point zone for entry/exit
     for (let i = 0; i < stops.length; i++) {
       const stop = stops[i];
-      const zoneId = stop.id; // "fuel:14"
+      const zoneName = stop.name; // Use name for matching
       
       // Get zone coordinates from stop data
       const coordinates = stop.geozone_coordinates || (stop.coordinates ? JSON.parse(stop.coordinates) : null);
@@ -44,17 +60,19 @@ class TripTracker {
       // Check if point is in zone
       const inZone = this.pointInZone(lat, lon, coordinates);
       
-      const stateKey = zoneId;
+      const stateKey = zoneName;
       const wasInZone = tracking.stopStates.get(stateKey)?.inZone || false;
 
       if (!wasInZone && inZone) {
-        // ENTER event
+        // ENTER event - find zone ID by name
+        const zoneId = await this.getZoneIdByName(zoneName) || stop.id;
         await this.logEvent(tripId, plate, stop, zoneId, 'ENTER', msg.loc_time, lat, lon, i);
-        tracking.stopStates.set(stateKey, { inZone: true, sequence: i, zoneName: stop.name });
+        tracking.stopStates.set(stateKey, { inZone: true, sequence: i, zoneName, zoneId });
       } else if (wasInZone && !inZone) {
         // EXIT event
+        const zoneId = tracking.stopStates.get(stateKey)?.zoneId || stop.id;
         await this.logEvent(tripId, plate, stop, zoneId, 'EXIT', msg.loc_time, lat, lon, i);
-        tracking.stopStates.set(stateKey, { inZone: false, sequence: i, zoneName: stop.name });
+        tracking.stopStates.set(stateKey, { inZone: false, sequence: i, zoneName, zoneId });
         await this.checkTripCompletion(tripId, plate);
       }
     }
@@ -115,14 +133,18 @@ class TripTracker {
     const stops = trip.selected_stop_points;
     const events = await db.getLatestEventPerZone(tripId);
     
-    // Check if all stops have been exited
-    const exitedZones = new Set(
+    // Check if all stops have been exited - match by zone_id
+    const exitedZoneIds = new Set(
       events.filter(e => e.event_type === 'EXIT').map(e => e.zone_id)
     );
     
-    const allCompleted = stops.every(stop => exitedZones.has(stop.id));
+    // For each stop, check if we have its zone_id in exited zones
+    const allCompleted = await Promise.all(stops.map(async (stop) => {
+      const zoneId = await this.getZoneIdByName(stop.name) || stop.id;
+      return exitedZoneIds.has(zoneId);
+    }));
     
-    if (allCompleted && trip.status !== 'delivered') {
+    if (allCompleted.every(c => c) && trip.status !== 'delivered') {
       await db.updateTripStatus(tripId, 'delivered');
       console.log(`[trip] Trip ${tripId} auto-completed to 'delivered'`);
       
