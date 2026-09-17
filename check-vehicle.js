@@ -10,17 +10,18 @@ const pool = new Pool({
 });
 
 const PLATE = process.argv[2] || 'MZ08FNGP';
-const DATE = process.argv[3] || '2026-09-17';
+const START_DATE = process.argv[3] || '2026-09-17';
+const END_DATE = process.argv[4] || START_DATE;
 
 async function run() {
   const { rows: msgs } = await pool.query(`
-    SELECT loc_time, latitude, longitude, fuel_probe_1_volume_in_tank, fuel_probe_2_volume_in_tank, status
+    SELECT plate, loc_time, latitude, longitude, fuel_probe_1_volume_in_tank, fuel_probe_2_volume_in_tank, status
     FROM vehicle_history
-    WHERE plate = $1 AND loc_time >= $2 AND loc_time <= $2 || ' 23:59:59'
+    WHERE plate = $1 AND loc_time >= $2 AND loc_time <= $3 || ' 23:59:59'
     ORDER BY loc_time::timestamptz ASC
-  `, [PLATE, DATE]);
+  `, [PLATE, START_DATE, END_DATE]);
 
-  console.log(`=== ${PLATE} messages on ${DATE} ===`);
+  console.log(`=== ${PLATE} messages ${START_DATE} to ${END_DATE} ===`);
   console.log('Total:', msgs.length);
   if (msgs.length === 0) { await pool.end(); return; }
 
