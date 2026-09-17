@@ -131,22 +131,26 @@ app.get('/api/trips/:tripId/progress', async (req, res) => {
     const events = await db.getLatestEventPerZone(req.params.tripId);
     const stops = trip.selected_stop_points || [];
 
-    const exitedZones = new Set(
-      events.filter(e => e.event_type === 'EXIT').map(e => e.zone_id)
+    // Match by zone_name (not zone_id, since trip stops use fuel:X format)
+    const exitedZoneNames = new Set(
+      events.filter(e => e.event_type === 'EXIT').map(e => e.zone_name)
     );
-    const enteredZones = new Set(
-      events.filter(e => e.event_type === 'ENTER').map(e => e.zone_id)
+    const enteredZoneNames = new Set(
+      events.filter(e => e.event_type === 'ENTER').map(e => e.zone_name)
     );
 
     const completed = [];
-    const current = null;
+    let current = null;
     const remaining = [];
 
     for (const stop of stops) {
-      const latestEvent = events.find(e => e.zone_id === stop.id);
-      if (exitedZones.has(stop.id)) {
+      const stopName = stop.name;
+      const latestEvent = events.find(e => e.zone_name === stopName);
+      
+      if (exitedZoneNames.has(stopName)) {
         completed.push({ ...stop, exitTime: latestEvent?.loc_time });
-      } else if (enteredZones.has(stop.id)) {
+      } else if (enteredZoneNames.has(stopName)) {
+        // Vehicle currently in this zone
         current = { ...stop, enterTime: latestEvent?.loc_time };
       } else {
         remaining.push(stop);
