@@ -15,57 +15,11 @@ let pool = null;
 let initialized = false;
 const vehicleCache = new Set();
 
-const VEHICLES = [
-  { plate: 'KL33HWGP', cost_code: 'WATE-0001' },
-  { plate: 'FV70YVGP', cost_code: 'WATE-0001' },
-  { plate: 'FM23CWGP', cost_code: 'WATE-0001' },
-  { plate: 'CP09PGGP', cost_code: 'WATE-0001' },
-  { plate: 'YWX933GP', cost_code: 'WATE-0001' },
-  { plate: 'JW59WDGP', cost_code: 'WATE-0001' },
-  { plate: 'LR78ZBGP', cost_code: 'WATE-0001' },
-  { plate: 'MF56SKGP', cost_code: 'WATE-0001' },
-  { plate: 'LD08STGP', cost_code: 'WATE-0001' },
-  { plate: 'LR78XJGP', cost_code: 'WATE-0001' },
-  { plate: 'KP48MNGP', cost_code: 'WATE-0001' },
-  { plate: 'KP48NFGP', cost_code: 'WATE-0001' },
-  { plate: 'LC62WSGP', cost_code: 'WATE-0001' },
-  { plate: 'MD69KRGP', cost_code: 'WATE-0001' },
-  { plate: 'MD69KJGP', cost_code: 'WATE-0001' },
-  { plate: 'MG45YNGP', cost_code: 'WATE-0001' },
-  { plate: 'LV75GCGP', cost_code: 'WATE-0001' },
-  { plate: 'HW65MMGP', cost_code: 'WATE-0001' },
-  { plate: 'JW59WJGP', cost_code: 'WATE-0001' },
-  { plate: 'LD08SSGP', cost_code: 'WATE-0001' },
-  { plate: 'JP29YVGP', cost_code: 'WATE-0001' },
-  { plate: 'JW59VYGP', cost_code: 'WATE-0001' },
-  { plate: 'LF60RGGP', cost_code: 'WATE-0001' },
-  { plate: 'JP29YTGP', cost_code: 'WATE-0001' },
-  { plate: 'LV75FKGP', cost_code: 'WATE-0001' },
-  { plate: 'JM39BBGP', cost_code: 'WATE-0001' },
-  { plate: 'KP48NCGP', cost_code: 'WATE-0001' },
-  { plate: 'KP48MWGP', cost_code: 'WATE-0001' },
-  { plate: 'KZ89MRGP', cost_code: 'WATE-0001' },
-  { plate: 'LD08SLGP', cost_code: 'WATE-0001' },
-  { plate: 'LR78YGGP', cost_code: 'WATE-0001' },
-  { plate: 'KN41XSGP', cost_code: 'WATE-0001' },
-  { plate: 'KC31RGGP', cost_code: 'WATE-0001' },
-  { plate: 'LD08SWGP', cost_code: 'WATE-0001' },
-  { plate: 'LS34PRGP', cost_code: 'WATE-0001' },
-  { plate: 'LR81ZZGP', cost_code: 'WATE-0001' },
-  { plate: 'LS34PMGP', cost_code: 'WATE-0001' },
-  { plate: 'KD57TSGP', cost_code: 'WATE-0001' },
-  { plate: 'LS34PGGP', cost_code: 'WATE-0001' },
-  { plate: 'FV26GTGP', cost_code: 'WATE-0001' },
-  { plate: 'FW28SMGP', cost_code: 'WATE-0001' },
-  { plate: 'JP88KFGP', cost_code: 'WATE-0001' },
-  { plate: 'MK84KSGP', cost_code: 'WATE-0001' },
-  { plate: 'KC93JKGP', cost_code: 'WATE-0001' },
-  { plate: 'LF60WPGP', cost_code: 'WATE-0001' },
-  { plate: 'LS38WYGP', cost_code: 'WATE-0001' },
-  { plate: 'LD13PHGP', cost_code: 'WATE-0001' }
-];
-
-const COST_CODES = Object.fromEntries(VEHICLES.map(v => [v.plate, v.cost_code]));
+const WATERFORD_URL = process.env.WATERFORD_SUPABASE_URL;
+const WATERFORD_KEY = process.env.WATERFORD_SUPABASE_SERVICE_ROLE_KEY || process.env.WATERFORD_SUPABASE_ANON_KEY;
+const waterfordSupabase = (WATERFORD_URL && WATERFORD_KEY)
+  ? createClient(WATERFORD_URL, WATERFORD_KEY, { auth: { persistSession: false } })
+  : null;
 
 const createPool = () => {
   const p = new Pool({
@@ -269,14 +223,41 @@ const createTables = async () => {
   console.log('[db] Tables ready');
 };
 
-const seedVehicles = async () => {
-  for (const { plate, cost_code } of VEHICLES) {
-    await query(
-      'INSERT INTO vehicles (plate, cost_code) VALUES ($1, $2) ON CONFLICT (plate) DO NOTHING',
-      [plate, cost_code]
-    );
+const syncVehicles = async () => {
+  if (!waterfordSupabase) {
+    console.warn('[db] Skipping vehicle sync - no WATERFORD Supabase client');
+    return 0;
   }
-  console.log(`[db] Seeded ${VEHICLES.length} vehicles`);
+
+  try {
+    const { data: vehicles, error } = await waterfordSupabase
+      .from('vehiclesc')
+      .select('registration_number');
+
+    if (error) throw error;
+    if (!vehicles || vehicles.length === 0) {
+      console.log('[db] No vehicles returned from WATERFORD Supabase');
+      return 0;
+    }
+
+    let synced = 0;
+    for (const v of vehicles) {
+      const plate = (v.registration_number || '').trim().toUpperCase();
+      if (!plate) continue;
+      await query(
+        'INSERT INTO vehicles (plate, cost_code) VALUES ($1, $2) ON CONFLICT (plate) DO UPDATE SET cost_code = $2',
+        [plate, 'WATE-0001']
+      );
+      synced++;
+    }
+
+    await loadVehicleCache();
+    console.log(`[db] Synced ${synced} vehicles from WATERFORD Supabase (${vehicleCache.size} total cached)`);
+    return synced;
+  } catch (err) {
+    console.error(`[db] Vehicle sync failed: ${err.message}`);
+    return 0;
+  }
 };
 
 const loadVehicleCache = async () => {
@@ -286,7 +267,7 @@ const loadVehicleCache = async () => {
 };
 
 const isKnownVehicle = (plate) => vehicleCache.has(plate);
-const getCostCode = (plate) => COST_CODES[plate] || null;
+const getCostCode = (plate) => vehicleCache.has(plate) ? 'WATE-0001' : null;
 
 const HISTORY_COLUMNS = [
   'plate', 'cost_code', 'speed', 'latitude', 'longitude', 'loc_time', 'mileage',
@@ -474,8 +455,7 @@ const init = async () => {
   if (initialized) return;
   await waitForDatabase();
   await createTables();
-  await seedVehicles();
-  await loadVehicleCache();
+  await syncVehicles();
   initialized = true;
 };
 
@@ -492,5 +472,5 @@ module.exports = {
   insertFillSession, insertTheftSession,
   upsertFuelStop, insertGeozoneEvent, getLatestFuelBefore,
   getOngoingSession, insertOperatingSession, closeOperatingSession,
-  getLatestFuelReading
+  getLatestFuelReading, syncVehicles
 };

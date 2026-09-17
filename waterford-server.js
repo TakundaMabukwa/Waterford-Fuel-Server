@@ -96,7 +96,13 @@ const start = async () => {
   try {
     await db.init();
 
+    await db.syncVehicles();
     await syncFuelStops();
+
+    cron.schedule('0 * * * *', async () => {
+      console.log('[cron] Running hourly vehicle sync');
+      await db.syncVehicles();
+    });
 
     cron.schedule('0 * * * *', async () => {
       console.log('[cron] Running hourly fuel stops sync');
