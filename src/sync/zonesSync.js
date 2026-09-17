@@ -36,9 +36,21 @@ const syncZones = async () => {
       return 0;
     }
 
+    // Deduplicate by name - keep first occurrence
+    const seenNames = new Set();
+    const uniqueStops = [];
+    for (const stop of stops) {
+      if (!seenNames.has(stop.name)) {
+        seenNames.add(stop.name);
+        uniqueStops.push(stop);
+      } else {
+        console.log(`[sync] Skipping duplicate zone name: ${stop.name} (id: ${stop.id})`);
+      }
+    }
+
     let synced = 0;
     const syncedIds = [];
-    for (const stop of stops) {
+    for (const stop of uniqueStops) {
       const coordinates = parseCoordinates(stop.coordinates) || stop.geozone_coordinates;
       if (!coordinates || !Array.isArray(coordinates) || coordinates.length < 3) continue;
 
@@ -67,7 +79,7 @@ const syncZones = async () => {
       if (removed) console.log(`[sync] Removed ${removed} stale zones not in Supabase`);
     }
 
-    console.log(`[sync] Synced ${synced} zones from WATERFORD Supabase`);
+    console.log(`[sync] Synced ${synced} zones from WATERFORD Supabase (${uniqueStops.length} unique)`);
     return synced;
   } catch (err) {
     console.error(`[sync] Zones sync failed: ${err.message}`);
