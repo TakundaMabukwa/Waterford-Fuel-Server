@@ -5,6 +5,8 @@ const cron = require('node-cron');
 const db = require('./waterford-db');
 const { createClient } = require('./waterford-ws-client');
 const { syncFuelStops } = require('./waterford-geozone');
+const { syncZones, syncTrips } = require('./waterford-trips');
+const { createWSServer } = require('./waterford-ws-server');
 
 const app = express();
 app.use(express.json());
@@ -106,30 +108,114 @@ app.get('/api/vehicles/:plate', async (req, res) => {
   }
 });
 
+// NEW: Trip monitoring endpoints
+app.post('/api/trips/sync', async (req, res) => {
+  try {
+    const synced = await syncTrips();
+    const { rows } = await db.query('SELECT COUNT(*) as total FROM trips');
+    res.json({
+      synced,
+      total: parseInt(rows[0].total),
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/trips/:tripId/progress', async (req, res) => {
+  try {
+    const trip = await db.getTripById(req.params.tripId);
+    if (!trip) return res.status(404).json({ error: 'Trip not found' });
+
+    const events = await db.getLatestEventPerZone(req.params.tripId);
+    const stops = trip.selected_stop_points || [];
+
+    const exitedZones = new Set(
+      events.filter(e => e.event_type === 'EXIT').map(e => e.zone_id)
+    );
+    const enteredZones = new Set(
+      events.filter(e => e.event_type === 'ENTER').map(e => e.zone_id)
+    );
+
+    const completed = [];
+    const current = null;
+    const remaining = [];
+
+    for (const stop of stops) {
+      const latestEvent = events.find(e => e.zone_id === stop.id);
+      if (exitedZones.has(stop.id)) {
+        completed.push({ ...stop, exitTime: latestEvent?.loc_time });
+      } else if (enteredZones.has(stop.id)) {
+        current = { ...stop, enterTime: latestEvent?.loc_time };
+      } else {
+        remaining.push(stop);
+      }
+    }
+
+    const progress = stops.length > 0 ? Math.round((completed.length / stops.length) * 100) : 0;
+
+    res.json({
+      tripId: req.params.tripId,
+      progress,
+      completed,
+      current,
+      remaining,
+      totalStops: stops.length,
+      tripStatus: trip.status
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/trips/:tripId/events', async (req, res) => {
+  try {
+    const events = await db.getTripZoneEvents(req.params.tripId);
+    res.json({ events });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/trips/:tripId', async (req, res) => {
+  try {
+    const trip = await db.getTripById(req.params.tripId);
+    if (!trip) return res.status(404).json({ error: 'Trip not found' });
+    res.json(trip);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 const start = async () => {
   try {
     await db.init();
 
     await db.syncVehicles();
+    await syncZones();
     await syncFuelStops();
+    await syncTrips();
 
+    // Hourly cron: vehicles, zones, fuel stops, trips
     cron.schedule('0 * * * *', async () => {
-      console.log('[cron] Running hourly vehicle sync');
+      console.log('[cron] Running hourly sync: vehicles, zones, fuel stops, trips');
       await db.syncVehicles();
-    });
-
-    cron.schedule('0 * * * *', async () => {
-      console.log('[cron] Running hourly fuel stops sync');
+      await syncZones();
       await syncFuelStops();
+      await syncTrips();
     });
 
     const wsClient = createClient(process.env.WEBSOCKET_URL || 'ws://209.38.217.58:8093');
 
     const PORT = process.env.PORT || 4000;
-    app.listen(PORT, () => {
+    const server = app.listen(PORT, () => {
       console.log(`[server] Running on port ${PORT}`);
       wsClient.connect();
     });
+
+    // Create WebSocket server for frontend trip updates
+    createWSServer(server);
 
     const shutdown = (signal) => {
       console.log(`[server] ${signal} received, shutting down`);

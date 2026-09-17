@@ -2,6 +2,7 @@ const WebSocket = require('ws');
 const { decodeFuelData, hasFuelData } = require('./waterford-fuel-decoder');
 const db = require('./waterford-db');
 const { findFuelStop, insertFuelReviewAction } = require('./waterford-geozone');
+const { TripTracker } = require('./waterford-trips');
 
 const createClient = (wsUrl) => {
   let ws = null;
@@ -10,6 +11,7 @@ const createClient = (wsUrl) => {
   let messageCount = 0;
   const geozoneTracking = {};
   const theftMonitoring = {};
+  const tripTracker = new TripTracker();
 
   const parseMessage = (raw) => {
     if (!raw || raw.length < 3) return null;
@@ -148,6 +150,7 @@ const createClient = (wsUrl) => {
 
     await processGeozone(msg, decoded);
     await processTheftDetection(msg, decoded);
+    await tripTracker.processMessage(msg.plate, msg, decoded);
   };
 
   const processGeozone = async (msg, decoded) => {
