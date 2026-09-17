@@ -36,6 +36,20 @@ app.get('/health', (req, res) => {
   });
 });
 
+app.post('/api/vehicles/sync', async (req, res) => {
+  try {
+    const synced = await db.syncVehicles();
+    const { rows } = await db.query('SELECT COUNT(*) as total FROM vehicles');
+    res.json({
+      synced,
+      total: parseInt(rows[0].total),
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.post('/api/fuel-stops/sync', async (req, res) => {
   try {
     const count = await syncFuelStops();
