@@ -3,24 +3,35 @@ const db = require('../../waterford-db');
 
 let cachedZones = null;
 
+const extractCoords = (coordinates) => {
+  if (!coordinates) return null;
+  let c = coordinates;
+  if (typeof c === 'string') {
+    try { c = JSON.parse(c); } catch { return null; }
+  }
+  if (Array.isArray(c)) return c;
+  if (c.type === 'Polygon' && Array.isArray(c.coordinates) && Array.isArray(c.coordinates[0])) {
+    return c.coordinates[0];
+  }
+  return null;
+};
+
 const findZone = async (lat, lon) => {
   if (!lat || !lon) return null;
 
   try {
     if (!cachedZones) {
       const { rows } = await db.getAllZones();
-      cachedZones = rows;
-      console.log(`[geozone] Cached ${rows.length} zones from local DB`);
+      cachedZones = rows.filter(z => {
+        const coords = extractCoords(z.coordinates);
+        return coords && coords.length >= 3;
+      });
+      console.log(`[geozone] Cached ${cachedZones.length} valid zones from local DB`);
     }
 
     for (const zone of cachedZones) {
-      let polygon = zone.coordinates;
-
-      if (typeof polygon === 'string') {
-        try { polygon = JSON.parse(polygon); } catch { continue; }
-      }
-
-      if (!Array.isArray(polygon) || polygon.length < 3) continue;
+      const polygon = extractCoords(zone.coordinates);
+      if (!polygon) continue;
 
       const closedRing = [...polygon, polygon[0]];
       const turfPolygon = {

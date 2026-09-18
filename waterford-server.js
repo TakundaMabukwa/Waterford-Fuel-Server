@@ -8,6 +8,13 @@ const { syncFuelStops } = require('./waterford-geozone');
 const { syncZones, syncTrips } = require('./waterford-trips');
 const { createWSServer } = require('./waterford-ws-server');
 
+process.on('uncaughtException', (err) => {
+  console.error('[server] Uncaught exception (not crashing):', err.message);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[server] Unhandled rejection (not crashing):', reason?.message || reason);
+});
+
 const app = express();
 app.use(express.json());
 app.use(cors());
