@@ -100,6 +100,7 @@ module.exports = {
   insertTripZoneEvent: tripEvents.insertTripZoneEvent,
   getTripZoneEvents: tripEvents.getTripZoneEvents,
   getLatestEventPerZone: tripEvents.getLatestEventPerZone,
+  getAllTripsProgress: tripEvents.getAllTripsProgress,
   
   // Fuel (existing system)
   upsertFuelStop,

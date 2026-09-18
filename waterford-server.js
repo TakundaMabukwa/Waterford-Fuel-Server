@@ -123,6 +123,16 @@ app.post('/api/trips/sync', async (req, res) => {
   }
 });
 
+// Batch progress for all active trips (used by dashboard)
+app.get('/api/trips/progress/all', async (req, res) => {
+  try {
+    const allProgress = await db.getAllTripsProgress();
+    res.json(allProgress);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/trips/:tripId/progress', async (req, res) => {
   try {
     const trip = await db.getTripById(req.params.tripId);

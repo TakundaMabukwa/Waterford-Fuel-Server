@@ -2,9 +2,26 @@ const db = require('../../waterford-db');
 const { findZone } = require('../../waterford-geozone');
 const { broadcastTripEvent } = require('./broadcaster');
 
+// Normalize: lowercase, trim, collapse whitespace
+const norm = (s) => (s || '').toLowerCase().trim().replace(/\s+/g, ' ');
+
+// Fuzzy match: checks if two names overlap (ilike with wildcards)
+const namesMatch = (a, b) => {
+  const na = norm(a);
+  const nb = norm(b);
+  if (!na || !nb) return false;
+  if (na === nb) return true;
+  if (na.includes(nb) || nb.includes(na)) return true;
+  // Check if first significant word matches
+  const wordsA = na.split(/\s+/);
+  const wordsB = nb.split(/\s+/);
+  // At least one word must match
+  return wordsA.some(w => w.length > 3 && wordsB.includes(w));
+};
+
 class TripTracker {
   constructor() {
-    // plate -> { tripId, stopStates: Map<zoneName, {inZone, sequence, zoneId, zoneName}> }
+    // plate -> { tripId, stopStates: Map<stopKey, {inZone, sequence, zoneId, zoneName}> }
     this.tracking = new Map();
   }
 
@@ -35,26 +52,28 @@ class TripTracker {
     // Use findZone to check if vehicle is in ANY zone (same as fuel system, turf-based)
     const currentZone = await findZone(lat, lon);
     
-    // Build set of stop zone names for quick lookup
-    const stopZoneNames = new Set(stops.map(s => s.name));
+    // Find matching stop for current zone (fuzzy match)
+    const matchedStop = currentZone
+      ? stops.find(s => namesMatch(s.name, currentZone.name) || namesMatch(s.name2, currentZone.name))
+      : null;
     
     // If in a zone that matches a stop point, handle entry
-    if (currentZone && stopZoneNames.has(currentZone.name)) {
-      const zoneName = currentZone.name;
-      const zoneId = currentZone.id; // numeric local zones table ID
+    if (currentZone && matchedStop) {
+      const stopKey = matchedStop.name; // use stop name as key
+      const zoneId = currentZone.id;
       
       // Initialize state if not exists
-      if (!tracking.stopStates.has(zoneName)) {
-        const sequence = stops.findIndex(s => s.name === zoneName);
-        tracking.stopStates.set(zoneName, { 
+      if (!tracking.stopStates.has(stopKey)) {
+        const sequence = stops.findIndex(s => s.name === matchedStop.name);
+        tracking.stopStates.set(stopKey, { 
           inZone: false, 
           sequence, 
-          zoneName, 
+          zoneName: matchedStop.name, 
           zoneId: null 
         });
       }
       
-      const state = tracking.stopStates.get(zoneName);
+      const state = tracking.stopStates.get(stopKey);
       const wasInZone = state.inZone;
       
       // Update zoneId when we first see the zone
@@ -62,17 +81,17 @@ class TripTracker {
       
       if (!wasInZone) {
         // ENTER event
-        const stop = stops.find(s => s.name === zoneName);
-        await this.logEvent(tripId, plate, stop, zoneId, 'ENTER', msg.loc_time, lat, lon, state.sequence);
+        await this.logEvent(tripId, plate, matchedStop, zoneId, 'ENTER', msg.loc_time, lat, lon, state.sequence);
         state.inZone = true;
       }
     }
     
     // Check for exits: any tracked stop zone that vehicle is NO longer in
-    for (const [zoneName, state] of tracking.stopStates) {
-      if (state.inZone && (!currentZone || currentZone.name !== zoneName)) {
+    for (const [stopKey, state] of tracking.stopStates) {
+      const stillInZone = currentZone && matchedStop && matchedStop.name === state.zoneName;
+      if (state.inZone && !stillInZone) {
         // EXIT event
-        const stop = stops.find(s => s.name === zoneName);
+        const stop = stops.find(s => s.name === state.zoneName);
         await this.logEvent(tripId, plate, stop, state.zoneId, 'EXIT', msg.loc_time, lat, lon, state.sequence);
         state.inZone = false;
         await this.checkTripCompletion(tripId, plate);
@@ -124,8 +143,10 @@ class TripTracker {
       events.filter(e => e.event_type === 'EXIT').map(e => e.zone_name)
     );
     
-    // All stops completed if every stop name has an EXIT event
-    const allCompleted = stops.every(stop => exitedZoneNames.has(stop.name));
+    // All stops completed if every stop name has an EXIT event (fuzzy match)
+    const allCompleted = stops.every(stop => 
+      [...exitedZoneNames].some(name => namesMatch(name, stop.name))
+    );
     
     if (allCompleted && trip.status !== 'delivered') {
       await db.updateTripStatus(tripId, 'delivered');

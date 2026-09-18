@@ -166,20 +166,29 @@ const createTables = async () => {
       ON fuel_stops (name)
   `);
 
-  // NEW: zones table - ALL fuel_stops (no type filter)
+// NEW: zones table - ALL fuel_stops (no type filter)
   await query(`
     CREATE TABLE IF NOT EXISTS zones (
-      id VARCHAR(50) PRIMARY KEY,
+      id VARCHAR(50) PRIMARY KEY,           -- fuel:14 (slug from Supabase)
       name VARCHAR(255) NOT NULL,
-      coordinates JSONB NOT NULL,
+      coordinates JSONB NOT NULL,            -- parsed geozone_coordinates
       geozone_name VARCHAR(255),
       type VARCHAR(50),
       source_type VARCHAR(50),
       location_lat DOUBLE PRECISION,
       location_lng DOUBLE PRECISION,
       radius INTEGER DEFAULT 100,
+      source_id VARCHAR(50),                 -- original Supabase fuel_stops.id (numeric)
       synced_at TIMESTAMPTZ DEFAULT NOW()
     )
+  `);
+
+  await query(`
+    CREATE INDEX IF NOT EXISTS idx_zones_name ON zones(name)
+  `);
+
+  await query(`
+    CREATE INDEX IF NOT EXISTS idx_zones_source_id ON zones(source_id)
   `);
 
   await query(`

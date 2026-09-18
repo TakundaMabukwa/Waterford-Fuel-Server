@@ -37,4 +37,32 @@ const getLatestEventPerZone = async (tripId) => {
   return rows;
 };
 
-module.exports = { insertTripZoneEvent, getTripZoneEvents, getLatestEventPerZone };
+const getAllTripsProgress = async () => {
+  const { rows } = await query(
+    `SELECT DISTINCT ON (trip_id, zone_id) trip_id, zone_id, zone_name, event_type, loc_time
+     FROM trip_zone_events
+     ORDER BY trip_id, zone_id, loc_time DESC`
+  );
+
+  const byTrip = {};
+  for (const row of rows) {
+    if (!byTrip[row.trip_id]) byTrip[row.trip_id] = [];
+    byTrip[row.trip_id].push(row);
+  }
+
+  const result = {};
+  for (const [tripId, events] of Object.entries(byTrip)) {
+    const exited = new Set(events.filter(e => e.event_type === 'EXIT').map(e => e.zone_name));
+    const entered = new Set(events.filter(e => e.event_type === 'ENTER').map(e => e.zone_name));
+    const exitTimeByZone = {};
+    const enterTimeByZone = {};
+    for (const e of events) {
+      if (e.event_type === 'EXIT') exitTimeByZone[e.zone_name] = e.loc_time;
+      if (e.event_type === 'ENTER') enterTimeByZone[e.zone_name] = e.loc_time;
+    }
+    result[tripId] = { exited: [...exited], entered: [...entered], exitTimeByZone, enterTimeByZone };
+  }
+  return result;
+};
+
+module.exports = { insertTripZoneEvent, getTripZoneEvents, getLatestEventPerZone, getAllTripsProgress };
